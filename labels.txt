@@ -1,0 +1,11 @@
+0 bag
+1 board
+2 chair
+3 door
+4 garbage
+5 laptop
+6 socket
+7 student_chair
+8 table
+9 text
+10 tv
