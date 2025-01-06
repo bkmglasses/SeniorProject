@@ -10,25 +10,51 @@ from google.cloud import firestore
 from gtts import gTTS
 import threading
 import subprocess
-import base64
 
 # Ensure TensorFlow uses CPU only
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-# Firestore setup
-db = firestore.Client()
+# ESP32-CAM Stream URL
+url = 'http://192.168.88.11/cam-hi.jpg'  # Adjust to your ESP32-CAM URL
 
-# Paths and URLs
-url = 'http://192.168.88.11/cam-hi.jpg'  # Adjust to your ESP32-CAM streaming URL
+# Attendance tracking
 attendance_folder = os.path.join(os.getcwd(), 'attendance')
 attendance_file = os.path.join(attendance_folder, "Attendance.csv")
-
-# Create necessary directories and files
 os.makedirs(attendance_folder, exist_ok=True)
 if not os.path.exists(attendance_file):
     pd.DataFrame(columns=["Name", "Time"]).to_csv(attendance_file, index=False)
 
-# Load attendance file
+# Firestore Initialization
+COLLECTION_NAME = "photos"  # Replace with your Firestore collection name
+
+# Function to verify Firestore connection
+def verify_firestore_connection():
+    try:
+        print("Initializing Firestore client...")
+        db = firestore.Client()
+        print("Firestore client connected successfully!")
+
+        # Test fetching documents
+        print(f"Fetching documents from collection '{COLLECTION_NAME}'...")
+        docs = db.collection(COLLECTION_NAME).stream()
+
+        document_found = False
+        for doc in docs:
+            document_found = True
+            print(f"Document ID: {doc.id}")
+            print(f"Document Data: {doc.to_dict()}")
+            print("-" * 50)
+
+        if not document_found:
+            print(f"No documents found in collection '{COLLECTION_NAME}'.")
+        else:
+            print("All documents fetched successfully!")
+        return db
+    except Exception as e:
+        print(f"Error connecting to Firestore: {e}")
+        raise
+
+# Mark attendance
 def markAttendance(name):
     try:
         df = pd.read_csv(attendance_file)
@@ -41,65 +67,57 @@ def markAttendance(name):
     except Exception as e:
         print(f"Error saving attendance: {e}")
 
-# Fetch known faces from Firestore
-def fetchImagesFromFirestore():
+# Load face encodings from Firestore
+def load_faces_from_firestore(db):
+    known_encodings = []
+    class_names = []
     try:
-        # Access the photos collection
-        photos_ref = db.collection('photos')
-        docs = photos_ref.stream()
-
-        images, classNames = [], []
-
-        # Process each document in the collection
+        docs = db.collection(COLLECTION_NAME).stream()
         for doc in docs:
             data = doc.to_dict()
-            if 'image' in data and 'description' in data:
-                # Decode the base64 image
-                image_data = base64.b64decode(data['image'])
-                np_image = np.frombuffer(image_data, np.uint8)
-                img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+            name = data.get("description", "Unknown")
+            image_base64 = data.get("image", "")
 
-                if img is not None:
-                    images.append(img)
-                    classNames.append(data['description'])
-
-        return images, classNames
+            # Decode base64 image
+            if image_base64:
+                img_data = np.frombuffer(bytearray(base64.b64decode(image_base64)), dtype=np.uint8)
+                img = cv2.imdecode(img_data, cv2.IMREAD_COLOR)
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                encodings = face_encodings(img_rgb)
+                if encodings:
+                    known_encodings.append(encodings[0])
+                    class_names.append(name)
+        print("Face encodings loaded successfully from Firestore.")
     except Exception as e:
-        print(f"Error fetching images from Firestore: {e}")
-        return [], []
+        print(f"Error loading faces from Firestore: {e}")
+    return known_encodings, class_names
 
-# Generate face encodings
-def findEncodings(images):
-    encodeList = []
-    for img in images:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        encodings = face_encodings(img)
-        if encodings:
-            encodeList.append(encodings[0])
-    return encodeList
+# Text-to-speech
+def speak(text):
+    try:
+        tts = gTTS(text=text, lang='en')
+        tts.save("temp_audio.mp3")
+        subprocess.call(["mpg321", "temp_audio.mp3"])  # Replace with the appropriate command for your system
+    except Exception as e:
+        print(f"Error with gTTS speech: {e}")
 
-# Fetch known faces and encodings
-images, classNames = fetchImagesFromFirestore()
-encodeListKnown = findEncodings(images)
-print("Face encoding completed.")
-
-# Function to process frames
+# Process frames
 frame_count = 0
-def process_frame(img):
+def process_frame(img, known_encodings, class_names):
     global frame_count
     try:
-        # Face Detection (Every frame)
+        # Resize image
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         faces = face_locations(img_rgb, model="hog")
         encodesCurFrame = face_encodings(img_rgb, faces)
 
         for encodeFace, faceLoc in zip(encodesCurFrame, faces):
-            faceDist = face_distance(encodeListKnown, encodeFace)
+            faceDist = face_distance(known_encodings, encodeFace)
             matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
-            name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.6 else "UNKNOWN"
+            name = class_names[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.6 else "UNKNOWN"
             if name != "UNKNOWN":
                 markAttendance(name)
-                threading.Thread(target=speak_thread, args=(f"{name} Detected",)).start()
+                threading.Thread(target=speak, args=(f"{name} Detected",)).start()
             print(name)
 
             # Draw rectangles around faces
@@ -115,41 +133,37 @@ def process_frame(img):
     except Exception as e:
         print(f"Error processing frame: {e}")
 
-# Function to speak using gTTS (Google Text-to-Speech)
-def speak(text):
+# Main Function
+if _name_ == "_main_":
     try:
-        tts = gTTS(text=text, lang='en')
-        tts.save("temp_audio.mp3")
-        subprocess.call(["mpg321", "temp_audio.mp3"])  # Plays the audio
+        # Verify Firestore connection
+        db = verify_firestore_connection()
+
+        # Load known faces from Firestore
+        known_encodings, class_names = load_faces_from_firestore(db)
+
+        # Main loop for ESP32-CAM stream
+        while True:
+            try:
+                img_resp = urllib.request.urlopen(url)
+                imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+                img = cv2.imdecode(imgnp, -1)
+
+                # Resize and rotate the image if needed
+                img = cv2.resize(img, (640, 480))
+                img = cv2.transpose(img)
+                img = cv2.flip(img, flipCode=0)
+
+                # Process frame
+                process_frame(img, known_encodings, class_names)
+
+                # Exit on 'q' key press
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            except Exception as e:
+                print(f"Error processing webcam stream: {e}")
+                break
+
+        cv2.destroyAllWindows()
     except Exception as e:
-        print(f"Error with gTTS speech: {e}")
-
-# Function to speak in a separate thread
-def speak_thread(text):
-    speak(text)
-
-# Main loop for ESP32 stream
-while True:
-    try:
-        img_resp = urllib.request.urlopen(url)
-        imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-        img = cv2.imdecode(imgnp, -1)
-
-        # Resize image to reduce load
-        img = cv2.resize(img, (640, 480))
-
-        # Rotate image if necessary
-        img = cv2.transpose(img)
-        img = cv2.flip(img, flipCode=0)
-
-        # Process frame
-        process_frame(img)
-
-        # Exit on 'q' key press
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    except Exception as e:
-        print(f"Error processing webcam stream: {e}")
-        break
-
-cv2.destroyAllWindows()
+        print(f"Fatal error: {e}")
