@@ -1,0 +1,155 @@
+import os
+import gc
+import cv2
+import numpy as np
+import urllib.request
+import pandas as pd
+from datetime import datetime
+from face_recognition import face_encodings, face_locations, face_distance
+from google.cloud import firestore
+from gtts import gTTS
+import threading
+import subprocess
+import base64
+
+# Ensure TensorFlow uses CPU only
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Firestore setup
+db = firestore.Client()
+
+# Paths and URLs
+url = 'http://192.168.88.11/cam-hi.jpg'  # Adjust to your ESP32-CAM streaming URL
+attendance_folder = os.path.join(os.getcwd(), 'attendance')
+attendance_file = os.path.join(attendance_folder, "Attendance.csv")
+
+# Create necessary directories and files
+os.makedirs(attendance_folder, exist_ok=True)
+if not os.path.exists(attendance_file):
+    pd.DataFrame(columns=["Name", "Time"]).to_csv(attendance_file, index=False)
+
+# Load attendance file
+def markAttendance(name):
+    try:
+        df = pd.read_csv(attendance_file)
+        if name not in df["Name"].values:
+            now = datetime.now()
+            dtString = now.strftime('%H:%M:%S')
+            new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
+            df = pd.concat([df, new_entry], ignore_index=True)
+            df.to_csv(attendance_file, index=False)
+    except Exception as e:
+        print(f"Error saving attendance: {e}")
+
+# Fetch known faces from Firestore
+def fetchImagesFromFirestore():
+    try:
+        # Access the photos collection
+        photos_ref = db.collection('photos')
+        docs = photos_ref.stream()
+
+        images, classNames = [], []
+
+        # Process each document in the collection
+        for doc in docs:
+            data = doc.to_dict()
+            if 'image' in data and 'description' in data:
+                # Decode the base64 image
+                image_data = base64.b64decode(data['image'])
+                np_image = np.frombuffer(image_data, np.uint8)
+                img = cv2.imdecode(np_image, cv2.IMREAD_COLOR)
+
+                if img is not None:
+                    images.append(img)
+                    classNames.append(data['description'])
+
+        return images, classNames
+    except Exception as e:
+        print(f"Error fetching images from Firestore: {e}")
+        return [], []
+
+# Generate face encodings
+def findEncodings(images):
+    encodeList = []
+    for img in images:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        encodings = face_encodings(img)
+        if encodings:
+            encodeList.append(encodings[0])
+    return encodeList
+
+# Fetch known faces and encodings
+images, classNames = fetchImagesFromFirestore()
+encodeListKnown = findEncodings(images)
+print("Face encoding completed.")
+
+# Function to process frames
+frame_count = 0
+def process_frame(img):
+    global frame_count
+    try:
+        # Face Detection (Every frame)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        faces = face_locations(img_rgb, model="hog")
+        encodesCurFrame = face_encodings(img_rgb, faces)
+
+        for encodeFace, faceLoc in zip(encodesCurFrame, faces):
+            faceDist = face_distance(encodeListKnown, encodeFace)
+            matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
+            name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.6 else "UNKNOWN"
+            if name != "UNKNOWN":
+                markAttendance(name)
+                threading.Thread(target=speak_thread, args=(f"{name} Detected",)).start()
+            print(name)
+
+            # Draw rectangles around faces
+            y1, x2, y2, x1 = faceLoc
+            color = (0, 255, 0) if name != "UNKNOWN" else (0, 0, 255)
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+
+        # Display frame
+        cv2.imshow("ESP32-CAM Stream", img)
+        frame_count += 1
+        gc.collect()
+    except Exception as e:
+        print(f"Error processing frame: {e}")
+
+# Function to speak using gTTS (Google Text-to-Speech)
+def speak(text):
+    try:
+        tts = gTTS(text=text, lang='en')
+        tts.save("temp_audio.mp3")
+        subprocess.call(["mpg321", "temp_audio.mp3"])  # Plays the audio
+    except Exception as e:
+        print(f"Error with gTTS speech: {e}")
+
+# Function to speak in a separate thread
+def speak_thread(text):
+    speak(text)
+
+# Main loop for ESP32 stream
+while True:
+    try:
+        img_resp = urllib.request.urlopen(url)
+        imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+        img = cv2.imdecode(imgnp, -1)
+
+        # Resize image to reduce load
+        img = cv2.resize(img, (640, 480))
+
+        # Rotate image if necessary
+        img = cv2.transpose(img)
+        img = cv2.flip(img, flipCode=0)
+
+        # Process frame
+        process_frame(img)
+
+        # Exit on 'q' key press
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    except Exception as e:
+        print(f"Error processing webcam stream: {e}")
+        break
+
+cv2.destroyAllWindows()
