@@ -1,0 +1,11 @@
+bag
+board
+chair
+door
+garbage
+laptop
+socket
+student chair
+table
+text
+tv

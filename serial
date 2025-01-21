@@ -1,0 +1,168 @@
+import cv2
+import numpy as np
+import os
+import gc
+import pandas as pd
+from datetime import datetime
+from face_recognition import face_encodings, face_locations, face_distance
+from tflite_runtime.interpreter import Interpreter
+from pytesseract import image_to_string
+import serial
+import time
+
+# Ensure TensorFlow uses CPU only
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Paths and URLs
+path = r'/home/bkm/Desktop/attendance'  # Adjust for your face images directory
+attendance_folder = os.path.join(os.getcwd(), 'attendance')
+attendance_file = os.path.join(attendance_folder, "Attendance.csv")
+model_path = "keras_model.tflite"  # Adjust to your TensorFlow Lite model path
+labels_path = "labels.txt"
+
+# Create necessary directories and files
+os.makedirs(attendance_folder, exist_ok=True)
+if not os.path.exists(attendance_file):
+    pd.DataFrame(columns=["Name", "Time"]).to_csv(attendance_file, index=False)
+
+# Open the serial port for communication
+ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+time.sleep(2)  # Allow some time for the serial connection to establish
+
+# Load attendance file
+def markAttendance(name):
+    try:
+        df = pd.read_csv(attendance_file)
+        if name not in df["Name"].values:
+            now = datetime.now()
+            dtString = now.strftime('%H:%M:%S')
+            new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
+            df = pd.concat([df, new_entry], ignore_index=True)
+            df.to_csv(attendance_file, index=False)
+    except Exception as e:
+        print(f"Error saving attendance: {e}")
+
+# Load known face images
+images, classNames = [], []
+for file_name in os.listdir(path):
+    img = cv2.imread(os.path.join(path, file_name))
+    if img is not None:
+        images.append(img)
+        classNames.append(os.path.splitext(file_name)[0])
+
+def findEncodings(images):
+    encodeList = []
+    for img in images:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        encodings = face_encodings(img)
+        if encodings:
+            encodeList.append(encodings[0])
+    return encodeList
+
+encodeListKnown = findEncodings(images)
+print("Face encoding completed.")
+
+# Load TFLite model
+interpreter = Interpreter(model_path=model_path)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Load labels
+with open(labels_path, "r") as file:
+    class_names = file.readlines()
+
+# Function to detect text using pytesseract
+def has_text(image):
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        text = image_to_string(gray)
+        return bool(text.strip())
+    except Exception as e:
+        print(f"Error during text detection: {e}")
+        return False
+
+# Object Detection
+def detect_object(image):
+    try:
+        img_resized = cv2.resize(image, (224, 224))  # Adjust based on model input size
+        input_data = np.asarray(img_resized, dtype=np.float32).reshape(1, 224, 224, 3) / 127.5 - 1
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+        return np.argmax(output_data[0]), output_data[0]
+    except Exception as e:
+        print(f"Error in object detection: {e}")
+        return None, None
+
+# Function to process frames
+def process_frame(img):
+    try:
+        # Object Detection
+        obj_index, prediction = detect_object(img)
+        if obj_index is not None:
+            class_name = class_names[obj_index].strip()
+            confidence_score = prediction[obj_index]
+            if confidence_score >= 0.91:
+                print(f"Object Detected: {class_name} (Confidence: {confidence_score:.2f})")
+
+        # Text Detection
+        if has_text(img):
+            print("Text detected in frame.")
+
+        # Face Detection
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        faces = face_locations(img_rgb, model="hog")
+        encodesCurFrame = face_encodings(img_rgb, faces)
+
+        for encodeFace, faceLoc in zip(encodesCurFrame, faces):
+            faceDist = face_distance(encodeListKnown, encodeFace)
+            matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
+            name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.6 else "UNKNOWN"
+            if name != "UNKNOWN":
+                markAttendance(name)
+            print(name)
+
+            # Draw rectangles around faces
+            y1, x2, y2, x1 = faceLoc
+            color = (0, 255, 0) if name != "UNKNOWN" else (0, 0, 255)
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+
+        # Display frame
+        cv2.imshow("ESP32-CAM Stream", img)
+        gc.collect()
+    except Exception as e:
+        print(f"Error processing frame: {e}")
+# Main loop to receive frames from the serial port
+buffer = bytearray()  # To accumulate frame data
+while True:
+    try:
+        # Read bytes from the serial buffer
+        while ser.in_waiting > 0:
+            byte = ser.read(1)
+            buffer += byte
+
+            # Look for JPEG boundaries
+            if len(buffer) > 2 and buffer[-2:] == b'\xff\xd9':  # JPEG end
+                frame_data = bytes(buffer)
+                buffer.clear()
+
+                # Decode the JPEG image
+                img = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+                # Process the frame
+                if img is not None:
+                    process_frame(img)
+                else:
+                    print("Error: Failed to decode JPEG image.")
+                break
+
+        # Exit on 'q' key press
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    except Exception as e:
+        print(f"Error processing serial data: {e}")
+        break
+
+cv2.destroyAllWindows()
