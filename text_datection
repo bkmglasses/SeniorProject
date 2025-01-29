@@ -7,7 +7,7 @@ import os
 import cv2
 import numpy as np
 import logging
-from playsound import playsound  # Import playsound for audio playback
+import pygame
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -93,8 +93,23 @@ class TextDetector:
                 tts = gTTS(text)
                 tts.save("output.mp3")
                 logging.info("Text converted to speech and saved as output.mp3")
-                # Play the audio file using playsound
-                playsound("output.mp3")
+                
+                # Check if the file is created successfully
+                if os.path.exists("output.mp3"):
+                    logging.info("MP3 file exists.")
+                else:
+                    logging.error("MP3 file not found.")
+                
+                # Initialize pygame mixer to play the sound
+                pygame.mixer.init()
+                pygame.mixer.music.load("output.mp3")
+                pygame.mixer.music.play()
+                
+                # Wait for the music to finish playing
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)  # Check every 10ms
+                
+                logging.info("Audio playback complete.")
             else:
                 logging.warning("No text detected in the image.")
         except Exception as e:
