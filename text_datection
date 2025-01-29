@@ -7,6 +7,7 @@ import os
 import cv2
 import numpy as np
 import logging
+from playsound import playsound  # Import playsound for audio playback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -92,8 +93,8 @@ class TextDetector:
                 tts = gTTS(text)
                 tts.save("output.mp3")
                 logging.info("Text converted to speech and saved as output.mp3")
-                # Play the audio file (optional, if mpg321 is installed)
-                os.system("mpg321 output.mp3")
+                # Play the audio file using playsound
+                playsound("output.mp3")
             else:
                 logging.warning("No text detected in the image.")
         except Exception as e:
