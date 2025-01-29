@@ -21,9 +21,11 @@ class TextDetector:
     def fetch_image(self):
         """Fetch image from ESP32-CAM."""
         try:
-            response = requests.get(self.esp32_cam_ip)
+            response = requests.get(self.esp32_cam_ip, stream=True)
             if response.status_code == 200:
-                return Image.open(io.BytesIO(response.content))
+                image_bytes = io.BytesIO(response.content)
+                image = Image.open(image_bytes)
+                return image
             else:
                 logging.error(f"Failed to fetch image from ESP32-CAM. Status code: {response.status_code}")
                 return None
@@ -97,15 +99,36 @@ class TextDetector:
         except Exception as e:
             logging.error(f"Error converting text to speech: {e}")
 
-if __name__ == "__main__":
+def display_video_stream():
+    """Display the live video stream from ESP32-CAM."""
     detector = TextDetector()
     
-    # Fetch the image from ESP32-CAM
-    image = detector.fetch_image()
-    
-    if image:
-        # Detect text in the image
-        text = detector.detect_text(image)
+    while True:
+        # Fetch the image from ESP32-CAM
+        image = detector.fetch_image()
         
-        # Convert text to speech
-        detector.text_to_speech(text)
+        if image:
+            # Convert PIL image to OpenCV format
+            frame = np.array(image)
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            
+            # Display the frame in a window
+            cv2.imshow("ESP32-CAM Stream", frame)
+            
+            # Detect text in the frame (optional)
+            text = detector.detect_text(image)
+            if text.strip():
+                print(f"Detected Text: {text}")
+            
+            # Exit on 'q' key press
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+        else:
+            logging.error("Failed to fetch frame from ESP32-CAM.")
+            break
+
+    # Release resources
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    display_video_stream()
