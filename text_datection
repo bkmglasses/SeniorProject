@@ -1,0 +1,111 @@
+import requests
+from PIL import Image
+import pytesseract
+from gtts import gTTS
+import io
+import os
+import cv2
+import numpy as np
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# ESP32-CAM IP address (replace with your actual ESP32-CAM IP)
+ESP32_CAM_IP = "http://192.168.88.8/cam-hi.jpg"  # Change to correct IP and resolution endpoint
+
+class TextDetector:
+    def __init__(self):
+        self.esp32_cam_ip = ESP32_CAM_IP
+
+    def fetch_image(self):
+        """Fetch image from ESP32-CAM."""
+        try:
+            response = requests.get(self.esp32_cam_ip)
+            if response.status_code == 200:
+                return Image.open(io.BytesIO(response.content))
+            else:
+                logging.error(f"Failed to fetch image from ESP32-CAM. Status code: {response.status_code}")
+                return None
+        except Exception as e:
+            logging.error(f"Error fetching image: {e}")
+            return None
+
+    def preprocess_image(self, image):
+        """Preprocess the image to enhance text detection."""
+        try:
+            # Convert the PIL image to a numpy array for OpenCV processing
+            img = np.array(image)
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Apply Gaussian blur to reduce noise
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            
+            # Apply adaptive thresholding
+            thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                           cv2.THRESH_BINARY, 11, 2)
+            
+            # Optional: Apply dilation to make text more prominent
+            kernel = np.ones((2, 2), np.uint8)
+            dilated = cv2.dilate(thresh, kernel, iterations=1)
+            
+            return dilated
+        except Exception as e:
+            logging.error(f"Error preprocessing image: {e}")
+            return None
+
+    def detect_text(self, image):
+        """Detect text in the image using pytesseract."""
+        try:
+            # Preprocess the image before running OCR
+            preprocessed_image = self.preprocess_image(image)
+            if preprocessed_image is None:
+                return ""
+            
+            # Use pytesseract to detect text with custom configuration
+            custom_config = r'--oem 3 --psm 6'  # OCR Engine Mode 3 and Page Segmentation Mode 6
+            text = pytesseract.image_to_string(preprocessed_image, config=custom_config)
+            
+            # Post-process the detected text to remove noise
+            cleaned_text = self.clean_text(text)
+            logging.info(f"Detected Text: {cleaned_text}")
+            return cleaned_text
+        except Exception as e:
+            logging.error(f"Error detecting text: {e}")
+            return ""
+
+    def clean_text(self, text):
+        """Clean up the detected text by removing unwanted characters and noise."""
+        # Remove extra spaces, newlines, and non-alphanumeric characters
+        cleaned_text = ' '.join(text.split())
+        cleaned_text = ''.join(e for e in cleaned_text if e.isalnum() or e.isspace())
+        return cleaned_text
+
+    def text_to_speech(self, text):
+        """Convert text to speech and save as an audio file."""
+        try:
+            if text.strip():
+                tts = gTTS(text)
+                tts.save("output.mp3")
+                logging.info("Text converted to speech and saved as output.mp3")
+                # Play the audio file (optional, if mpg321 is installed)
+                os.system("mpg321 output.mp3")
+            else:
+                logging.warning("No text detected in the image.")
+        except Exception as e:
+            logging.error(f"Error converting text to speech: {e}")
+
+if __name__ == "__main__":
+    detector = TextDetector()
+    
+    # Fetch the image from ESP32-CAM
+    image = detector.fetch_image()
+    
+    if image:
+        # Detect text in the image
+        text = detector.detect_text(image)
+        
+        # Convert text to speech
+        detector.text_to_speech(text)
