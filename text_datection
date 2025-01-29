@@ -1,150 +1,183 @@
-import requests
-from PIL import Image
-import pytesseract
-from gtts import gTTS
-import io
-import os
 import cv2
 import numpy as np
-import logging
-import pygame
+import urllib.request
+import os
+import gc
+import pandas as pd
+from datetime import datetime
+from face_recognition import face_encodings, face_locations, face_distance
+from tflite_runtime.interpreter import Interpreter
+from pytesseract import image_to_string
+from gtts import gTTS
+import threading
+import subprocess
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Ensure TensorFlow uses CPU only
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-# ESP32-CAM IP address (replace with your actual ESP32-CAM IP)
-ESP32_CAM_IP = "http://192.168.88.8/cam-hi.jpg"  # Change to correct IP and resolution endpoint
+# Paths and URLs
+path = r'/home/bkm/Desktop/attendance/image_folder'  # Adjust for your face images directory
+url = 'http://192.168.88.8/cam-hi.jpg'  # Adjust to your ESP32-CAM streaming URL
+attendance_folder = os.path.join(os.getcwd(), 'attendance')
+attendance_file = os.path.join(attendance_folder, "Attendance.csv")
+model_path = "keras_model.tflite"  # Adjust to your TensorFlow Lite model path
+labels_path = "labels.txt"
 
-class TextDetector:
-    def __init__(self):
-        self.esp32_cam_ip = ESP32_CAM_IP
+# Create necessary directories and files
+os.makedirs(attendance_folder, exist_ok=True)
+if not os.path.exists(attendance_file):
+    pd.DataFrame(columns=["Name", "Time"]).to_csv(attendance_file, index=False)
 
-    def fetch_image(self):
-        """Fetch image from ESP32-CAM."""
-        try:
-            response = requests.get(self.esp32_cam_ip, stream=True)
-            if response.status_code == 200:
-                image_bytes = io.BytesIO(response.content)
-                image = Image.open(image_bytes)
-                return image
-            else:
-                logging.error(f"Failed to fetch image from ESP32-CAM. Status code: {response.status_code}")
-                return None
-        except Exception as e:
-            logging.error(f"Error fetching image: {e}")
-            return None
+# Load attendance file
+def markAttendance(name):
+    try:
+        df = pd.read_csv(attendance_file)
+        if name not in df["Name"].values:
+            now = datetime.now()
+            dtString = now.strftime('%H:%M:%S')
+            new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
+            df = pd.concat([df, new_entry], ignore_index=True)
+            df.to_csv(attendance_file, index=False)
+    except Exception as e:
+        print(f"Error saving attendance: {e}")
 
-    def preprocess_image(self, image):
-        """Preprocess the image to enhance text detection."""
-        try:
-            # Convert the PIL image to a numpy array for OpenCV processing
-            img = np.array(image)
-            
-            # Convert to grayscale
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
-            # Apply Gaussian blur to reduce noise
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            
-            # Apply adaptive thresholding
-            thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                           cv2.THRESH_BINARY, 11, 2)
-            
-            # Optional: Apply dilation to make text more prominent
-            kernel = np.ones((2, 2), np.uint8)
-            dilated = cv2.dilate(thresh, kernel, iterations=1)
-            
-            return dilated
-        except Exception as e:
-            logging.error(f"Error preprocessing image: {e}")
-            return None
+# Load known face images
+images, classNames = [], []
+for file_name in os.listdir(path):
+    img = cv2.imread(os.path.join(path, file_name))
+    if img is not None:
+        images.append(img)
+        classNames.append(os.path.splitext(file_name)[0])
 
-    def detect_text(self, image):
-        """Detect text in the image using pytesseract."""
-        try:
-            # Preprocess the image before running OCR
-            preprocessed_image = self.preprocess_image(image)
-            if preprocessed_image is None:
-                return ""
-            
-            # Use pytesseract to detect text with custom configuration
-            custom_config = r'--oem 3 --psm 6'  # OCR Engine Mode 3 and Page Segmentation Mode 6
-            text = pytesseract.image_to_string(preprocessed_image, config=custom_config)
-            
-            # Post-process the detected text to remove noise
-            cleaned_text = self.clean_text(text)
-            logging.info(f"Detected Text: {cleaned_text}")
-            return cleaned_text
-        except Exception as e:
-            logging.error(f"Error detecting text: {e}")
-            return ""
+def findEncodings(images):
+    encodeList = []
+    for img in images:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        encodings = face_encodings(img)
+        if encodings:
+            encodeList.append(encodings[0])
+    return encodeList
 
-    def clean_text(self, text):
-        """Clean up the detected text by removing unwanted characters and noise."""
-        # Remove extra spaces, newlines, and non-alphanumeric characters
-        cleaned_text = ' '.join(text.split())
-        cleaned_text = ''.join(e for e in cleaned_text if e.isalnum() or e.isspace())
-        return cleaned_text
+encodeListKnown = findEncodings(images)
+print("Face encoding completed.")
 
-    def text_to_speech(self, text):
-        """Convert text to speech and save as an audio file."""
-        try:
-            if text.strip():
-                tts = gTTS(text)
-                tts.save("output.mp3")
-                logging.info("Text converted to speech and saved as output.mp3")
-                
-                # Check if the file is created successfully
-                if os.path.exists("output.mp3"):
-                    logging.info("MP3 file exists.")
-                else:
-                    logging.error("MP3 file not found.")
-                
-                # Initialize pygame mixer to play the sound
-                pygame.mixer.init()
-                pygame.mixer.music.load("output.mp3")
-                pygame.mixer.music.play()
-                
-                # Wait for the music to finish playing
-                while pygame.mixer.music.get_busy():
-                    pygame.time.Clock().tick(10)  # Check every 10ms
-                
-                logging.info("Audio playback complete.")
-            else:
-                logging.warning("No text detected in the image.")
-        except Exception as e:
-            logging.error(f"Error converting text to speech: {e}")
+# Load TFLite model
+interpreter = Interpreter(model_path=model_path)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
 
-def display_video_stream():
-    """Display the live video stream from ESP32-CAM."""
-    detector = TextDetector()
-    
-    while True:
-        # Fetch the image from ESP32-CAM
-        image = detector.fetch_image()
-        
-        if image:
-            # Convert PIL image to OpenCV format
-            frame = np.array(image)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            
-            # Display the frame in a window
-            cv2.imshow("ESP32-CAM Stream", frame)
-            
-            # Detect text in the frame (optional)
-            text = detector.detect_text(image)
-            if text.strip():
-                print(f"Detected Text: {text}")
-            
-            # Exit on 'q' key press
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        else:
-            logging.error("Failed to fetch frame from ESP32-CAM.")
+# Load labels
+with open(labels_path, "r") as file:
+    class_names = file.readlines()
+
+# Function to detect text using pytesseract
+def has_text(image):
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        text = image_to_string(gray)
+        return bool(text.strip())
+    except Exception as e:
+        print(f"Error during text detection: {e}")
+        return False
+
+# Object Detection
+def detect_object(image):
+    try:
+        img_resized = cv2.resize(image, (224, 224))  # Adjust based on model input size
+        input_data = np.asarray(img_resized, dtype=np.float32).reshape(1, 224, 224, 3) / 127.5 - 1
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+        return np.argmax(output_data[0]), output_data[0]
+    except Exception as e:
+        print(f"Error in object detection: {e}")
+        return None, None
+
+# Function to process frames
+frame_count = 0
+def process_frame(img):
+    global frame_count
+    try:
+        # Object Detection (Only every 5th frame)
+        if frame_count % 5 == 0:
+            obj_index, prediction = detect_object(img)
+            if obj_index is not None:
+                class_name = class_names[obj_index].strip()
+                confidence_score = prediction[obj_index]
+                if confidence_score >= 0.91:
+                    print(f"Object Detected: {class_name} (Confidence: {confidence_score:.2f})")
+                    speak(f"{class_name} Detected")
+
+        # Text Detection (Only every 10th frame)
+        if frame_count % 10 == 0:
+            if has_text(img):
+                print("Text detected in frame.")
+                speak("Text detected in frame")
+
+        # Face Detection (Every frame)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        faces = face_locations(img_rgb, model="hog")
+        encodesCurFrame = face_encodings(img_rgb, faces)
+
+        for encodeFace, faceLoc in zip(encodesCurFrame, faces):
+            faceDist = face_distance(encodeListKnown, encodeFace)
+            matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
+            name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.6 else "UNKNOWN"
+            if name != "UNKNOWN":
+                markAttendance(name)
+                threading.Thread(target=speak_thread, args=(f"{name} Detected",)).start()
+            print(name)
+
+            # Draw rectangles around faces
+            y1, x2, y2, x1 = faceLoc
+            color = (0, 255, 0) if name != "UNKNOWN" else (0, 0, 255)
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
+
+        # Display frame
+        cv2.imshow("ESP32-CAM Stream", img)
+        frame_count += 1
+        gc.collect()
+    except Exception as e:
+        print(f"Error processing frame: {e}")
+
+# Function to speak using gTTS (Google Text-to-Speech)
+def speak(text):
+    try:
+        tts = gTTS(text=text, lang='en')
+        tts.save("temp_audio.mp3")
+        # Play the audio using mpg321 or any player you prefer
+        subprocess.call(["mpg321", "temp_audio.mp3"])  # Plays the audio
+    except Exception as e:
+        print(f"Error with gTTS speech: {e}")
+
+# Function to speak in a separate thread
+def speak_thread(text):
+    speak(text)
+
+# Main loop for ESP32 stream
+while True:
+    try:
+        img_resp = urllib.request.urlopen(url)
+        imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+        img = cv2.imdecode(imgnp, -1)
+
+        # Resize image to reduce load
+        img = cv2.resize(img, (640, 480))
+
+        # Rotate image if necessary
+        img = cv2.transpose(img)
+        img = cv2.flip(img, flipCode=0)
+
+        # Process frame
+        process_frame(img)
+
+        # Exit on 'q' key press
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+    except Exception as e:
+        print(f"Error processing webcam stream: {e}")
+        break
 
-    # Release resources
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    display_video_stream()
+cv2.destroyAllWindows()
