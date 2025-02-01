@@ -1,21 +1,19 @@
 import cv2
 import numpy as np
 import urllib.request
-import os
-import gc
 import pandas as pd
 from datetime import datetime
 from face_recognition import face_encodings, face_locations, face_distance
 from tflite_runtime.interpreter import Interpreter
 from pytesseract import image_to_string
 from gtts import gTTS
-import threading
 import subprocess
 import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
 import qrcode
-import io
+import threading
+import os
 
 # Ensure TensorFlow uses CPU only
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -108,7 +106,6 @@ def process_frame(img, user_id):
         # Display frame
         cv2.imshow("ESP32-CAM Stream", img)
         frame_count += 1
-        gc.collect()
 
     except Exception as e:
         print(f"Error processing frame: {e}")
@@ -204,14 +201,17 @@ qr_scanned = False
 user_id = None
 
 # Main loop for ESP32 stream
-url = 'http://192.168.88.11/cam-hi.jpg'  # Adjust to your ESP32-CAM streaming URL
+url = 'http://192.168.88.5/cam-hi.jpg'  # Adjust to your ESP32-CAM streaming URL
+
+# Speak the message only once to ask for QR code scan
+if not qr_scanned:
+    speak("Please scan the QR code to begin.")
+    qr_scanned = True  # After speaking, set to True to proceed
+
 while True:
     try:
         # Wait for QR code scan (set qr_scanned to True once QR is scanned)
         if not qr_scanned:
-            print("Please scan the QR code to begin.")
-            # Implement QR code scan logic here (from camera or other input)
-            # Once QR is scanned, set qr_scanned = True and extract the user_id from the QR
             continue
         
         img_resp = urllib.request.urlopen(url)
