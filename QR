@@ -14,13 +14,12 @@ import base64
 import qrcode
 import threading
 import os
-os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 # Ensure TensorFlow uses CPU only
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 # Paths and URLs
-attendance_folder = os.path.join(os.getcwd(), 'attendance')
+attendance_folder = "attendance"
 attendance_file = os.path.join(attendance_folder, "Attendance.csv")
 model_path = "keras_model.tflite"
 labels_path = "labels.txt"
@@ -30,11 +29,9 @@ os.makedirs(attendance_folder, exist_ok=True)
 if not os.path.exists(attendance_file):
     pd.DataFrame(columns=["Name", "Time"]).to_csv(attendance_file, index=False)
 
-# Initialize Firebase Admin SDK
-cred = credentials.Certificate('/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json')
+# Initialize Firebase
+cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
 firebase_admin.initialize_app(cred)
-
-# Initialize Firestore
 db = firestore.client()
 
 # Load TFLite model
@@ -47,105 +44,136 @@ output_details = interpreter.get_output_details()
 with open(labels_path, "r") as file:
     class_names = file.readlines()
 
+# Initialize Variables
+frame_count = 0
+user_id = None
+encodeListKnown = []
+classNames = []
+qr_scanned = False
+
 # Function to mark attendance
 def markAttendance(name):
-    df = pd.read_csv(attendance_file)
-    if name not in df["Name"].values:
-        now = datetime.now()
-        dtString = now.strftime('%H:%M:%S')
-        df = pd.concat([df, pd.DataFrame({"Name": [name], "Time": [dtString]})], ignore_index=True)
-        df.to_csv(attendance_file, index=False)
+    try:
+        df = pd.read_csv(attendance_file)
+        if name not in df["Name"].values:
+            now = datetime.now()
+            dtString = now.strftime('%H:%M:%S')
+            new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
+            df = pd.concat([df, new_entry], ignore_index=True)
+            df.to_csv(attendance_file, index=False)
+            print(f"✅ Attendance Marked: {name} at {dtString}")
+    except Exception as e:
+        print(f"❌ Error saving attendance: {e}")
 
-# Function to find face encodings
-def findEncodings(images):
-    encodings = []
-    for img in images:
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        encodings.append(face_encodings(img_rgb)[0])
-    return encodings
+# Function to speak using gTTS
+def speak(text):
+    try:
+        tts = gTTS(text=text, lang='en')
+        tts.save("temp_audio.mp3")
+        subprocess.call(["mpg321", "temp_audio.mp3"])
+        print(f"🔊 Spoken: {text}")
+    except Exception as e:
+        print(f"❌ Error with gTTS speech: {e}")
 
 # Function to load images and encode faces
 def load_images_from_firestore(user_id):
     images, classNames = [], []
-    photos_ref = db.collection('photos').where('userId', '==', user_id)
+    print(f"📡 Fetching images for user: {user_id}")
+
+    photos_ref = db.collection("photos").where("userId", "==", user_id)
     docs = photos_ref.stream()
-    
+
     for doc in docs:
         data = doc.to_dict()
-        base64_image = data.get('image')
-        name = data.get('description')
+        base64_image = data.get("image")
+        name = data.get("description")
+
         if base64_image and name:
             img_data = base64.b64decode(base64_image)
             nparr = np.frombuffer(img_data, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
             if img is not None:
                 images.append(img)
                 classNames.append(name)
-    
+
+    print(f"✅ Loaded {len(images)} images for encoding.")
     return images, classNames
 
-# Function to process frames
-def process_frame(img, encodeListKnown, classNames):
+# Function to encode faces
+def findEncodings(images):
+    encodings = []
+    for img in images:
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        enc = face_encodings(img_rgb)
+        if enc:
+            encodings.append(enc[0])  # Only take first detected face
+    print(f"✅ Encoded {len(encodings)} faces.")
+    return encodings
+
+# Function to process frame
+def process_frame(img):
+    global frame_count, encodeListKnown, classNames
+
+    # Convert to RGB
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    faces = face_locations(img_rgb, model="hog")
+    faces = face_locations(img_rgb)
+
+    print(f"🔍 Detected {len(faces)} faces in frame.")
+
+    if len(faces) == 0:
+        return
+
     encodesCurFrame = face_encodings(img_rgb, faces)
-    
     for encodeFace, faceLoc in zip(encodesCurFrame, faces):
         faceDist = face_distance(encodeListKnown, encodeFace)
         matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
         name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.4 else "UNKNOWN"
-        
+
+        print(f"👤 Recognized: {name}")
+
         if name != "UNKNOWN":
             markAttendance(name)
             threading.Thread(target=speak, args=(f"{name} Detected",)).start()
-        
+
         y1, x2, y2, x1 = faceLoc
         color = (0, 255, 0) if name != "UNKNOWN" else (0, 0, 255)
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
         cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
-    
+
     cv2.imshow("ESP32-CAM Stream", img)
 
-# Function to speak
-def speak(text):
-    tts = gTTS(text=text, lang='en')
-    tts.save("temp_audio.mp3")
-    subprocess.call(["mpg321", "temp_audio.mp3"])
+# Main loop
+url = "http://192.168.88.5/cam-hi.jpg"
 
-# Main loop for ESP32 stream
-url = 'http://192.168.88.5/cam-hi.jpg'
-qr_scanned = False
-user_id = None
-encodeListKnown = []
-classNames = []
-
-speak("Please scan the QR code to begin.")
+# Ensure QR scan before proceeding
+if not qr_scanned:
+    print("📢 Waiting for QR Code scan...")
+    speak("Please scan the QR code to begin.")
+    qr_scanned = True
 
 while True:
     try:
-        if not qr_scanned:
+        if not qr_scanned or not user_id:
             continue
-        
-        if user_id and not encodeListKnown:
-            images, classNames = load_images_from_firestore(user_id)
-            if images:
-                encodeListKnown = findEncodings(images)
-                print("Face encoding completed.")
-            else:
-                print("No images found for this user.")
-                continue
 
         img_resp = urllib.request.urlopen(url)
         imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
         img = cv2.imdecode(imgnp, -1)
         img = cv2.resize(img, (640, 480))
-        
-        process_frame(img, encodeListKnown, classNames)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if user_id and not encodeListKnown:
+            print(f"📡 Loading user data for: {user_id}")
+            images, classNames = load_images_from_firestore(user_id)
+            encodeListKnown = findEncodings(images)
+
+        process_frame(img)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
+
     except Exception as e:
-        print(f"Error processing webcam stream: {e}")
+        print(f"❌ Error processing stream: {e}")
         break
 
 cv2.destroyAllWindows()
