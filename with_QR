@@ -38,6 +38,11 @@ firebase_admin.initialize_app(cred)
 # Initialize Firestore
 db = firestore.client()
 
+# Initialize a variable to store the last spoken name
+last_name = None
+last_speech_time = None
+speech_delay = 2  # Delay time in seconds to trigger speech again
+
 # Load attendance file
 def markAttendance(name):
     try:
@@ -51,81 +56,9 @@ def markAttendance(name):
     except Exception as e:
         print(f"Error saving attendance: {e}")
 
-# Load known face images from Firestore
-images, classNames = [], []
-
-# Fetch documents from the 'photos' collection
-photos_ref = db.collection('photos')
-docs = photos_ref.stream()
-
-for doc in docs:
-    data = doc.to_dict()
-    base64_image = data.get('image')  # Assuming the base64 image is stored under the key 'image'
-    name = data.get('description')  # Assuming the name is stored under the key 'description'
-    
-    if base64_image and name:
-        # Decode the base64 image
-        img_data = base64.b64decode(base64_image)
-        nparr = np.frombuffer(img_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if img is not None:
-            images.append(img)
-            classNames.append(name)
-
-def findEncodings(images):
-    encodeList = []
-    for img in images:
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        encodings = face_encodings(img)
-        if encodings:
-            encodeList.append(encodings[0])
-    return encodeList
-
-encodeListKnown = findEncodings(images)
-print("Face encoding completed.")
-
-# Load TFLite model
-interpreter = Interpreter(model_path=model_path)
-interpreter.allocate_tensors()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
-
-# Load labels
-with open(labels_path, "r") as file:
-    class_names = file.readlines()
-
-# Function to detect text using pytesseract
-def has_text(image):
-    try:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        text = image_to_string(gray)
-        return bool(text.strip())
-    except Exception as e:
-        print(f"Error during text detection: {e}")
-        return False
-
-# Object Detection
-def detect_object(image):
-    try:
-        img_resized = cv2.resize(image, (224, 224))  # Adjust based on model input size
-        input_data = np.asarray(img_resized, dtype=np.float32).reshape(1, 224, 224, 3) / 127.5 - 1
-        interpreter.set_tensor(input_details[0]['index'], input_data)
-        interpreter.invoke()
-        output_data = interpreter.get_tensor(output_details[0]['index'])
-        return np.argmax(output_data[0]), output_data[0]
-    except Exception as e:
-        print(f"Error in object detection: {e}")
-        return None, None
-
-# Initialize a variable to store the last spoken name
-last_name = None
-last_speech_time = None
-speech_delay = 2  # Delay time in seconds to trigger speech again
-
 # Function to process frames
 frame_count = 0
-def process_frame(img):
+def process_frame(img, user_id):
     global frame_count, last_name, last_speech_time
     try:
         # Object Detection (Only every 5th frame)
@@ -159,8 +92,9 @@ def process_frame(img):
             if name != "UNKNOWN" and (name != last_name or last_speech_time is None or (current_time - last_speech_time).seconds >= speech_delay):
                 last_name = name
                 last_speech_time = current_time  # Update the last speech time
-                markAttendance(name)
-                threading.Thread(target=speak_thread, args=(f"{name} Detected",)).start()
+                if name != "UNKNOWN":
+                    markAttendance(name)
+                    threading.Thread(target=speak_thread, args=(f"{name} Detected",)).start()
 
                 # Generate QR code for this user (to be validated by ESP32-CAM)
                 generate_qr_code(name)
@@ -207,10 +141,79 @@ def generate_qr_code(name):
     img_qr.save(f"{name}_qr.png")  # Save the QR code as an image
     print(f"QR code for {name} generated.")
 
+# Function to detect object using TFLite model
+def detect_object(image):
+    try:
+        img_resized = cv2.resize(image, (224, 224))  # Adjust based on model input size
+        input_data = np.asarray(img_resized, dtype=np.float32).reshape(1, 224, 224, 3) / 127.5 - 1
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+        return np.argmax(output_data[0]), output_data[0]
+    except Exception as e:
+        print(f"Error in object detection: {e}")
+        return None, None
+
+# Function to detect text using pytesseract
+def has_text(image):
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        text = image_to_string(gray)
+        return bool(text.strip())
+    except Exception as e:
+        print(f"Error during text detection: {e}")
+        return False
+
+# Function to load images and encode faces
+def load_images_from_firestore(user_id):
+    images, classNames = [], []
+    
+    # Fetch documents from the 'photos' collection
+    photos_ref = db.collection('photos').where('userId', '==', user_id)  # Filter by userId
+    docs = photos_ref.stream()
+
+    for doc in docs:
+        data = doc.to_dict()
+        base64_image = data.get('image')  # Assuming the base64 image is stored under the key 'image'
+        name = data.get('description')  # Assuming the name is stored under the key 'description'
+        
+        if base64_image and name:
+            # Decode the base64 image
+            img_data = base64.b64decode(base64_image)
+            nparr = np.frombuffer(img_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if img is not None:
+                images.append(img)
+                classNames.append(name)
+
+    return images, classNames
+
+# Load TFLite model
+interpreter = Interpreter(model_path=model_path)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Load labels
+with open(labels_path, "r") as file:
+    class_names = file.readlines()
+
+# Initialize the QR code scanning mode
+qr_scanned = False
+user_id = None
+
 # Main loop for ESP32 stream
 url = 'http://192.168.88.11/cam-hi.jpg'  # Adjust to your ESP32-CAM streaming URL
 while True:
     try:
+        # Wait for QR code scan (set qr_scanned to True once QR is scanned)
+        if not qr_scanned:
+            print("Please scan the QR code to begin.")
+            # Implement QR code scan logic here (from camera or other input)
+            # Once QR is scanned, set qr_scanned = True and extract the user_id from the QR
+            continue
+        
         img_resp = urllib.request.urlopen(url)
         imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
         img = cv2.imdecode(imgnp, -1)
@@ -222,8 +225,14 @@ while True:
         img = cv2.transpose(img)
         img = cv2.flip(img, flipCode=0)
 
+        # Load user-specific data after QR scan
+        if user_id:
+            images, classNames = load_images_from_firestore(user_id)
+            encodeListKnown = findEncodings(images)
+            print("Face encoding completed.")
+
         # Process frame
-        process_frame(img)
+        process_frame(img, user_id)
 
         # Exit on 'q' key press
         if cv2.waitKey(1) & 0xFF == ord('q'):
