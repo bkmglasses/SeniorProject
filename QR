@@ -1,38 +1,38 @@
 import cv2
 import numpy as np
 import urllib.request
+import pyzbar.pyzbar as pyzbar
 import pandas as pd
 from datetime import datetime
 from face_recognition import face_encodings, face_locations, face_distance
 from tflite_runtime.interpreter import Interpreter
-from pytesseract import image_to_string
 from gtts import gTTS
 import subprocess
 import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
-import qrcode
 import threading
 import os
 
 # Ensure TensorFlow uses CPU only
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
-# Paths and URLs
-attendance_folder = "attendance"
-attendance_file = os.path.join(attendance_folder, "Attendance.csv")
-model_path = "keras_model.tflite"
-labels_path = "labels.txt"
-
-# Create necessary directories and files
-os.makedirs(attendance_folder, exist_ok=True)
-if not os.path.exists(attendance_file):
-    pd.DataFrame(columns=["Name", "Time"]).to_csv(attendance_file, index=False)
-
-# Initialize Firebase
+# Firebase Initialization
 cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
+
+# Paths
+url = "http://192.168.88.5/cam-hi.jpg"
+model_path = "keras_model.tflite"
+labels_path = "labels.txt"
+attendance_folder = "attendance"
+attendance_file = os.path.join(attendance_folder, "Attendance.csv")
+
+# Ensure folders exist
+os.makedirs(attendance_folder, exist_ok=True)
+if not os.path.exists(attendance_file):
+    pd.DataFrame(columns=["Name", "Time"]).to_csv(attendance_file, index=False)
 
 # Load TFLite model
 interpreter = Interpreter(model_path=model_path)
@@ -40,16 +40,16 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Load labels
+# Load class labels
 with open(labels_path, "r") as file:
     class_names = file.readlines()
 
-# Initialize Variables
-frame_count = 0
-user_id = None
+# Global Variables
 encodeListKnown = []
 classNames = []
 qr_scanned = False
+user_id = None
+
 
 # Function to mark attendance
 def markAttendance(name):
@@ -65,6 +65,7 @@ def markAttendance(name):
     except Exception as e:
         print(f"❌ Error saving attendance: {e}")
 
+
 # Function to speak using gTTS
 def speak(text):
     try:
@@ -75,7 +76,8 @@ def speak(text):
     except Exception as e:
         print(f"❌ Error with gTTS speech: {e}")
 
-# Function to load images and encode faces
+
+# Function to load user images from Firebase
 def load_images_from_firestore(user_id):
     images, classNames = [], []
     print(f"📡 Fetching images for user: {user_id}")
@@ -100,6 +102,7 @@ def load_images_from_firestore(user_id):
     print(f"✅ Loaded {len(images)} images for encoding.")
     return images, classNames
 
+
 # Function to encode faces
 def findEncodings(images):
     encodings = []
@@ -111,15 +114,42 @@ def findEncodings(images):
     print(f"✅ Encoded {len(encodings)} faces.")
     return encodings
 
-# Function to process frame
-def process_frame(img):
-    global frame_count, encodeListKnown, classNames
 
-    # Convert to RGB
+# Function to scan QR code
+def scan_qr():
+    global qr_scanned, user_id
+    print("📢 Waiting for QR Code scan...")
+    speak("Please scan the QR code to begin.")
+
+    while not qr_scanned:
+        try:
+            img_resp = urllib.request.urlopen(url)
+            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+            frame = cv2.imdecode(imgnp, -1)
+
+            decoded_objects = pyzbar.decode(frame)
+            for obj in decoded_objects:
+                qr_data = obj.data.decode("utf-8")
+                print(f"✅ QR Code Detected: {qr_data}")
+                user_id = qr_data  # Assuming the QR code contains the user ID
+                qr_scanned = True
+                return
+
+            cv2.imshow("QR Scan", frame)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+        except Exception as e:
+            print(f"❌ QR Scan Error: {e}")
+
+    cv2.destroyAllWindows()
+
+
+# Function to process frame for face recognition
+def process_frame(img):
+    global encodeListKnown, classNames
+
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     faces = face_locations(img_rgb)
-
-    print(f"🔍 Detected {len(faces)} faces in frame.")
 
     if len(faces) == 0:
         return
@@ -129,8 +159,6 @@ def process_frame(img):
         faceDist = face_distance(encodeListKnown, encodeFace)
         matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
         name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.4 else "UNKNOWN"
-
-        print(f"👤 Recognized: {name}")
 
         if name != "UNKNOWN":
             markAttendance(name)
@@ -143,37 +171,31 @@ def process_frame(img):
 
     cv2.imshow("ESP32-CAM Stream", img)
 
-# Main loop
-url = "http://192.168.88.5/cam-hi.jpg"
 
-# Ensure QR scan before proceeding
-if not qr_scanned:
-    print("📢 Waiting for QR Code scan...")
-    speak("Please scan the QR code to begin.")
-    qr_scanned = True
+# Main program execution
+if __name__ == "__main__":
+    # First, scan QR code
+    scan_qr()
 
-while True:
-    try:
-        if not qr_scanned or not user_id:
-            continue
+    # Load user data
+    print(f"📡 Loading user data for: {user_id}")
+    images, classNames = load_images_from_firestore(user_id)
+    encodeListKnown = findEncodings(images)
 
-        img_resp = urllib.request.urlopen(url)
-        imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-        img = cv2.imdecode(imgnp, -1)
-        img = cv2.resize(img, (640, 480))
+    # Start face recognition
+    while True:
+        try:
+            img_resp = urllib.request.urlopen(url)
+            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+            img = cv2.imdecode(imgnp, -1)
+            img = cv2.resize(img, (640, 480))
 
-        if user_id and not encodeListKnown:
-            print(f"📡 Loading user data for: {user_id}")
-            images, classNames = load_images_from_firestore(user_id)
-            encodeListKnown = findEncodings(images)
+            process_frame(img)
 
-        process_frame(img)
-
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+        except Exception as e:
+            print(f"❌ Error processing stream: {e}")
             break
 
-    except Exception as e:
-        print(f"❌ Error processing stream: {e}")
-        break
-
-cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
