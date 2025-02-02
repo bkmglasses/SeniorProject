@@ -51,30 +51,37 @@ qr_scanned = False
 user_id = None
 
 
-# Function to mark attendance
-def markAttendance(name):
-    try:
-        df = pd.read_csv(attendance_file)
-        if name not in df["Name"].values:
-            now = datetime.now()
-            dtString = now.strftime('%H:%M:%S')
-            new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
-            df = pd.concat([df, new_entry], ignore_index=True)
-            df.to_csv(attendance_file, index=False)
-            print(f"✅ Attendance Marked: {name} at {dtString}")
-    except Exception as e:
-        print(f"❌ Error saving attendance: {e}")
+# Function to scan QR code (taken from first working code)
+def scan_qr():
+    global qr_scanned, user_id
+    print("📢 Waiting for QR Code scan...")
 
+    prev = ""
+    while not qr_scanned:
+        try:
+            img_resp = urllib.request.urlopen(url)
+            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+            frame = cv2.imdecode(imgnp, -1)
 
-# Function to speak using gTTS
-def speak(text):
-    try:
-        tts = gTTS(text=text, lang='en')
-        tts.save("temp_audio.mp3")
-        subprocess.call(["mpg321", "temp_audio.mp3"])
-        print(f"🔊 Spoken: {text}")
-    except Exception as e:
-        print(f"❌ Error with gTTS speech: {e}")
+            decodedObjects = pyzbar.decode(frame)
+            for obj in decodedObjects:
+                pres = obj.data.decode("utf-8")
+                if prev == pres:
+                    pass
+                else:
+                    print(f"✅ QR Code Detected: {pres}")
+                    prev = pres
+                    user_id = pres  # Assuming QR code contains user ID
+                    qr_scanned = True
+                    break  # Exit loop once scanned
+
+            cv2.imshow("QR Scan", frame)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+        except Exception as e:
+            print(f"❌ QR Scan Error: {e}")
+
+    cv2.destroyAllWindows()
 
 
 # Function to load user images from Firebase
@@ -115,35 +122,6 @@ def findEncodings(images):
     return encodings
 
 
-# Function to scan QR code
-def scan_qr():
-    global qr_scanned, user_id
-    print("📢 Waiting for QR Code scan...")
-    speak("Please scan the QR code to begin.")
-
-    while not qr_scanned:
-        try:
-            img_resp = urllib.request.urlopen(url)
-            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-            frame = cv2.imdecode(imgnp, -1)
-
-            decoded_objects = pyzbar.decode(frame)
-            for obj in decoded_objects:
-                qr_data = obj.data.decode("utf-8")
-                print(f"✅ QR Code Detected: {qr_data}")
-                user_id = qr_data  # Assuming the QR code contains the user ID
-                qr_scanned = True
-                return
-
-            cv2.imshow("QR Scan", frame)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-        except Exception as e:
-            print(f"❌ QR Scan Error: {e}")
-
-    cv2.destroyAllWindows()
-
-
 # Function to process frame for face recognition
 def process_frame(img):
     global encodeListKnown, classNames
@@ -162,7 +140,6 @@ def process_frame(img):
 
         if name != "UNKNOWN":
             markAttendance(name)
-            threading.Thread(target=speak, args=(f"{name} Detected",)).start()
 
         y1, x2, y2, x1 = faceLoc
         color = (0, 255, 0) if name != "UNKNOWN" else (0, 0, 255)
