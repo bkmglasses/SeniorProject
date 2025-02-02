@@ -11,6 +11,10 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import base64
 import os
+import gc
+import threading
+import subprocess
+from pytesseract import image_to_string
 
 # Ensure TensorFlow uses CPU only
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -38,22 +42,37 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
+# Load labels
+with open(labels_path, "r") as file:
+    class_names = file.readlines()
+
 # Global Variables
 encodeListKnown = []
 classNames = []
 qr_scanned = False
 user_id = None
+last_name = None
+last_speech_time = None
+speech_delay = 2  # Delay time in seconds to trigger speech again
+frame_count = 0
 
-# 🔊 Function to speak text
+# ðŸ”Š Function to speak text
 def speak(text):
-    tts = gTTS(text=text, lang="en")
-    tts.save("speech.mp3")
-    os.system("mpg321 speech.mp3")  # Requires `mpg321` installed
+    try:
+        tts = gTTS(text=text, lang="en")
+        tts.save("temp_audio.mp3")
+        subprocess.call(["mpg321", "temp_audio.mp3"])  # Plays the audio
+    except Exception as e:
+        print(f"Error with gTTS speech: {e}")
 
-# 📸 **Function to scan QR code**
+# Function to speak in a separate thread
+def speak_thread(text):
+    speak(text)
+
+# ðŸ“¸ **Function to scan QR code**
 def scan_qr():
     global qr_scanned, user_id
-    print("📢 Waiting for QR Code scan...")
+    print("ðŸ“¢ Waiting for QR Code scan...")
     speak("Waiting for QR Code scan.")
 
     prev = ""
@@ -67,7 +86,7 @@ def scan_qr():
             for obj in decodedObjects:
                 pres = obj.data.decode("utf-8")
                 if prev != pres:
-                    print(f"✅ QR Code Detected: {pres}")
+                    print(f"âœ… QR Code Detected: {pres}")
                     speak("QR code detected.")
                     prev = pres
                     user_id = pres  # Assuming QR code contains user ID
@@ -78,12 +97,12 @@ def scan_qr():
             if cv2.waitKey(1) & 0xFF == 27:
                 break
         except Exception as e:
-            print(f"❌ QR Scan Error: {e}")
+            print(f"âŒ QR Scan Error: {e}")
             speak("QR scan failed. Please try again.")
 
     cv2.destroyAllWindows()
 
-# 📝 **Function to Mark Attendance**
+# ðŸ“ **Function to Mark Attendance**
 def markAttendance(name):
     try:
         df = pd.read_csv(attendance_file)
@@ -95,16 +114,16 @@ def markAttendance(name):
             new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
             df = pd.concat([df, new_entry], ignore_index=True)
             df.to_csv(attendance_file, index=False)
-            print(f"✅ Attendance Marked: {name} at {dtString}")
-            speak(f"Attendance marked for {name}.")
+            print(f"âœ… Attendance Marked: {name} at {dtString}")
+
     except Exception as e:
-        print(f"❌ Error saving attendance: {e}")
+        print(f"âŒ Error saving attendance: {e}")
         speak("Error in saving attendance.")
 
-# 🔄 **Function to load user images from Firebase**
+# ðŸ”„ **Function to load user images from Firebase**
 def load_images_from_firestore(user_id):
     images, classNames = [], []
-    print(f"📢 Fetching images for user: {user_id}")
+    print(f"ðŸ“¢ Fetching images for user: {user_id}")
     speak("Fetching user data from database.")
 
     photos_ref = db.collection("photos").where("userId", "==", user_id)
@@ -124,11 +143,11 @@ def load_images_from_firestore(user_id):
                 images.append(img)
                 classNames.append(name)
 
-    print(f"✅ Loaded {len(images)} images for encoding.")
+    print(f"âœ… Loaded {len(images)} images for encoding.")
     speak(f"Loaded {len(images)} images.")
     return images, classNames
 
-# 🎭 **Function to encode faces**
+# ðŸŽ­ **Function to encode faces**
 def findEncodings(images):
     encodings = []
     for img in images:
@@ -137,54 +156,100 @@ def findEncodings(images):
         if enc:
             encodings.append(enc[0])  # Only take first detected face
     
-    print(f"✅ Encoded Faces: {len(encodings)}")
+    print(f"âœ… Encoded Faces: {len(encodings)}")
     speak(f"Encoded {len(encodings)} faces.")
     return encodings
 
-# 🔍 **Function to process frame for face recognition**
+# Function to detect text using pytesseract
+def has_text(image):
+    try:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        text = image_to_string(gray)
+        return bool(text.strip())
+    except Exception as e:
+        print(f"Error during text detection: {e}")
+        return False
+
+# Object Detection
+def detect_object(image):
+    try:
+        img_resized = cv2.resize(image, (224, 224))  # Adjust based on model input size
+        input_data = np.asarray(img_resized, dtype=np.float32).reshape(1, 224, 224, 3) / 127.5 - 1
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+        return np.argmax(output_data[0]), output_data[0]
+    except Exception as e:
+        print(f"Error in object detection: {e}")
+        return None, None
+
+# ðŸ” **Function to process frame for face recognition, text detection, and object detection**
 def process_frame(img):
-    global encodeListKnown, classNames
+    global frame_count, last_name, last_speech_time
 
+    # Object Detection (Only every 5th frame)
+    if frame_count % 5 == 0:
+        obj_index, prediction = detect_object(img)
+        if obj_index is not None:
+            class_name = class_names[obj_index].strip()
+            confidence_score = prediction[obj_index]
+            if confidence_score >= 0.91:
+                print(f"Object Detected: {class_name} (Confidence: {confidence_score:.2f})")
+                speak(f"{class_name} Detected")
+
+    # Text Detection (Only every 10th frame)
+    if frame_count % 10 == 0:
+        if has_text(img):
+            print("Text detected in frame.")
+            speak("Text detected in frame")
+
+    # Face Detection (Every frame)
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    faces = face_locations(img_rgb)
-
-    if len(faces) == 0:
-        print("⚠️ No faces detected in this frame.")
-        return
-
+    faces = face_locations(img_rgb, model="hog")
     encodesCurFrame = face_encodings(img_rgb, faces)
+
     for encodeFace, faceLoc in zip(encodesCurFrame, faces):
         faceDist = face_distance(encodeListKnown, encodeFace)
         matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
-        name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.6 else "UNKNOWN"
-
-        if name != "UNKNOWN":
+        name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.4 else "UNKNOWN"
+        
+        # Only process and speak when the name is different from the last name or if enough time has passed
+        current_time = datetime.now()
+        if name != "UNKNOWN" and (name != last_name or last_speech_time is None or (current_time - last_speech_time).seconds >= speech_delay):
+            last_name = name
+            last_speech_time = current_time  # Update the last speech time
             markAttendance(name)
+            threading.Thread(target=speak_thread, args=(f"{name} Detected",)).start()
 
+        # Draw rectangles around faces
         y1, x2, y2, x1 = faceLoc
         color = (0, 255, 0) if name != "UNKNOWN" else (0, 0, 255)
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
         cv2.putText(img, name, (x1 + 6, y2 - 6), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 2)
 
+    # Display frame
     cv2.imshow("ESP32-CAM Stream", img)
+    frame_count += 1
+    gc.collect()
 
-# 🎯 **Main program execution**
+# ðŸŽ¯ **Main program execution**
 if __name__ == "__main__":
+    
     # Scan QR Code
     scan_qr()
 
     # Load user data
-    print(f"📢 Loading user data for: {user_id}")
-    speak(f"Loading user data for {user_id}.")
+    print(f"ðŸ“¢ Loading user data for: {user_id}")
+
     
     images, classNames = load_images_from_firestore(user_id)
     encodeListKnown = findEncodings(images)
 
     if len(encodeListKnown) == 0:
-        print("❌ No face encodings found! Face recognition will not work.")
+        print("âŒ No face encodings found! Face recognition will not work.")
         speak("Error. No known faces detected.")
     else:
-        speak("Face recognition system is now active.")
+        speak("the system is active now .")
 
     # Start face recognition
     while True:
@@ -193,13 +258,14 @@ if __name__ == "__main__":
             imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
             img = cv2.imdecode(imgnp, -1)
             img = cv2.resize(img, (640, 480))
-
+            img = cv2.transpose(img)
+            img = cv2.flip(img, flipCode=0)
             process_frame(img)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
         except Exception as e:
-            print(f"❌ Error processing stream: {e}")
+            print(f"âŒ Error processing stream: {e}")
             speak("Error in processing camera stream.")
             break
 
