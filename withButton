@@ -15,9 +15,29 @@ import gc
 import threading
 import subprocess
 from pytesseract import image_to_string
+import time
+import RPi.GPIO as GPIO
+from flask import Flask, request, Response
+from twilio.rest import Client
 
-# Ensure TensorFlow uses CPU only
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+# Initialize Flask app
+app = Flask(__name__)
+
+# Define button GPIO pins
+button_pin1 = 26
+button_pin2 = 6
+
+# Setup GPIO
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(button_pin1, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(button_pin2, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+# Twilio credentials
+account_sid = 'AC546a86e7e1a218e83584a7f248727429'
+auth_token = 'ec848792b4623536665b2fa624a35b32'
+twilio_number = 'whatsapp:+14155238886'  # Twilio sandbox number
+to_number = 'whatsapp:+972569305404'  # Your phone number (connected to the sandbox)
+client = Client(account_sid, auth_token)
 
 # Firebase Initialization
 cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
@@ -25,7 +45,7 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # Paths
-url = "http://192.168.88.4/cam-hi.jpg"
+url = "http://192.168.88.14/cam-hi.jpg"
 model_path = "keras_model.tflite"
 labels_path = "labels.txt"
 attendance_folder = "attendance"
@@ -56,7 +76,20 @@ last_speech_time = None
 speech_delay = 2  # Delay time in seconds to trigger speech again
 frame_count = 0
 
-# ðŸ”Š Function to speak text
+# Function to send a WhatsApp message
+def send_whatsapp_message():
+    print("Button pressed! Sending WhatsApp message...")
+    try:
+        message = client.messages.create(
+            body="Hi, Call Me Back",
+            from_=twilio_number,
+            to=to_number
+        )
+        print(f"Message sent to {to_number}, SID: {message.sid}")
+    except Exception as e:
+        print(f"Error sending message: {e}")
+
+# Function to speak text
 def speak(text):
     try:
         tts = gTTS(text=text, lang="en")
@@ -69,85 +102,74 @@ def speak(text):
 def speak_thread(text):
     speak(text)
 
-# ðŸ“¸ **Function to scan QR code**
+# QR Code scanning function
 def scan_qr():
     global qr_scanned, user_id
-    print("ðŸ“¢ Waiting for QR Code scan...")
+    print("Waiting for QR Code scan...")
     speak("Waiting for QR Code scan.")
-
     prev = ""
     while not qr_scanned:
         try:
             img_resp = urllib.request.urlopen(url)
             imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
             frame = cv2.imdecode(imgnp, -1)
-
             decodedObjects = pyzbar.decode(frame)
             for obj in decodedObjects:
                 pres = obj.data.decode("utf-8")
                 if prev != pres:
-                    print(f"âœ… QR Code Detected: {pres}")
+                    print(f"QR Code Detected: {pres}")
                     speak("QR code detected.")
                     prev = pres
                     user_id = pres  # Assuming QR code contains user ID
                     qr_scanned = True
-                    break  # Exit loop once scanned
-
+                    break
             cv2.imshow("QR Scan", frame)
             if cv2.waitKey(1) & 0xFF == 27:
                 break
         except Exception as e:
-            print(f"âŒ QR Scan Error: {e}")
+            print(f"QR Scan Error: {e}")
             speak("QR scan failed. Please try again.")
-
     cv2.destroyAllWindows()
 
-# ðŸ“ **Function to Mark Attendance**
+# Function to mark attendance
 def markAttendance(name):
     try:
         df = pd.read_csv(attendance_file)
         now = datetime.now()
         dtString = now.strftime('%H:%M:%S')
 
-        # Prevent duplicate attendance
         if name not in df["Name"].values:
             new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
             df = pd.concat([df, new_entry], ignore_index=True)
             df.to_csv(attendance_file, index=False)
-            print(f"âœ… Attendance Marked: {name} at {dtString}")
-
+            print(f"Attendance Marked: {name} at {dtString}")
     except Exception as e:
-        print(f"âŒ Error saving attendance: {e}")
+        print(f"Error saving attendance: {e}")
         speak("Error in saving attendance.")
 
-# ðŸ”„ **Function to load user images from Firebase**
+# Function to load user images from Firebase
 def load_images_from_firestore(user_id):
     images, classNames = [], []
-    print(f"ðŸ“¢ Fetching images for user: {user_id}")
+    print(f"Fetching images for user: {user_id}")
     speak("Fetching user data from database.")
-
     photos_ref = db.collection("photos").where("userId", "==", user_id)
     docs = photos_ref.stream()
-
     for doc in docs:
         data = doc.to_dict()
         base64_image = data.get("image")
         name = data.get("description")
-
         if base64_image and name:
             img_data = base64.b64decode(base64_image)
             nparr = np.frombuffer(img_data, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
             if img is not None:
                 images.append(img)
                 classNames.append(name)
-
-    print(f"âœ… Loaded {len(images)} images for encoding.")
+    print(f"Loaded {len(images)} images for encoding.")
     speak(f"Loaded {len(images)} images.")
     return images, classNames
 
-# ðŸŽ­ **Function to encode faces**
+# Function to encode faces
 def findEncodings(images):
     encodings = []
     for img in images:
@@ -155,8 +177,7 @@ def findEncodings(images):
         enc = face_encodings(img_rgb)
         if enc:
             encodings.append(enc[0])  # Only take first detected face
-    
-    print(f"âœ… Encoded Faces: {len(encodings)}")
+    print(f"Encoded Faces: {len(encodings)}")
     speak(f"Encoded {len(encodings)} faces.")
     return encodings
 
@@ -183,7 +204,7 @@ def detect_object(image):
         print(f"Error in object detection: {e}")
         return None, None
 
-# ðŸ” **Function to process frame for face recognition, text detection, and object detection**
+# Function to process frame for face recognition, text detection, and object detection
 def process_frame(img):
     global frame_count, last_name, last_speech_time
 
@@ -232,24 +253,31 @@ def process_frame(img):
     frame_count += 1
     gc.collect()
 
-# ðŸŽ¯ **Main program execution**
+# Start Flask server
+@app.route('/button_press', methods=['POST'])
+def button_press():
+    if request.form.get('button') == '1':
+        send_whatsapp_message()
+    return Response(status=200)
+
+# Main program execution
 if __name__ == "__main__":
+    # Start Flask in a separate thread to handle button press
+    threading.Thread(target=lambda: app.run(debug=False, host='0.0.0.0', port=5000), daemon=True).start()
     
     # Scan QR Code
     scan_qr()
 
     # Load user data
-    print(f"ðŸ“¢ Loading user data for: {user_id}")
-
-    
+    print(f"Loading user data for: {user_id}")
     images, classNames = load_images_from_firestore(user_id)
     encodeListKnown = findEncodings(images)
 
     if len(encodeListKnown) == 0:
-        print("âŒ No face encodings found! Face recognition will not work.")
+        print("No face encodings found! Face recognition will not work.")
         speak("Error. No known faces detected.")
     else:
-        speak("the system is active now .")
+        speak("The system is active now.")
 
     # Start face recognition
     while True:
@@ -265,7 +293,7 @@ if __name__ == "__main__":
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
         except Exception as e:
-            print(f"âŒ Error processing stream: {e}")
+            print(f"Error processing stream: {e}")
             speak("Error in processing camera stream.")
             break
 
