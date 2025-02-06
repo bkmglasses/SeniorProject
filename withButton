@@ -17,35 +17,22 @@ import subprocess
 from pytesseract import image_to_string
 import time
 import RPi.GPIO as GPIO
-from flask import Flask, request, Response
 from twilio.rest import Client
 
-# Initialize Flask app
-app = Flask(__name__)
-
-# Define button GPIO pins
-button_pin1 = 26
-button_pin2 = 6
-
-# Setup GPIO
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(button_pin1, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(button_pin2, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-
-# Twilio credentials
+# Initialize Twilio client
 account_sid = 'AC546a86e7e1a218e83584a7f248727429'
 auth_token = 'ec848792b4623536665b2fa624a35b32'
 twilio_number = 'whatsapp:+14155238886'  # Twilio sandbox number
 to_number = 'whatsapp:+972569305404'  # Your phone number (connected to the sandbox)
 client = Client(account_sid, auth_token)
 
-# Firebase Initialization
+# Initialize Firebase
 cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # Paths
-url = "http://192.168.88.14/cam-hi.jpg"
+url = "http://192.168.88.4/cam-hi.jpg"
 model_path = "keras_model.tflite"
 labels_path = "labels.txt"
 attendance_folder = "attendance"
@@ -65,6 +52,13 @@ output_details = interpreter.get_output_details()
 # Load labels
 with open(labels_path, "r") as file:
     class_names = file.readlines()
+
+# Define button GPIO pins
+button_pin1 = 26  # Button to trigger WhatsApp message
+
+# Setup GPIO
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(button_pin1, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 # Global Variables
 encodeListKnown = []
@@ -97,10 +91,6 @@ def speak(text):
         subprocess.call(["mpg321", "temp_audio.mp3"])  # Plays the audio
     except Exception as e:
         print(f"Error with gTTS speech: {e}")
-
-# Function to speak in a separate thread
-def speak_thread(text):
-    speak(text)
 
 # QR Code scanning function
 def scan_qr():
@@ -253,18 +243,8 @@ def process_frame(img):
     frame_count += 1
     gc.collect()
 
-# Start Flask server
-@app.route('/button_press', methods=['POST'])
-def button_press():
-    if request.form.get('button') == '1':
-        send_whatsapp_message()
-    return Response(status=200)
-
 # Main program execution
 if __name__ == "__main__":
-    # Start Flask in a separate thread to handle button press
-    threading.Thread(target=lambda: app.run(debug=False, host='0.0.0.0', port=5000), daemon=True).start()
-    
     # Scan QR Code
     scan_qr()
 
@@ -279,9 +259,15 @@ if __name__ == "__main__":
     else:
         speak("The system is active now.")
 
-    # Start face recognition
-    while True:
-        try:
+    # Start button detection loop
+    try:
+        print("Starting button detection...")
+        while True:
+            # Check if the button is pressed
+            if GPIO.input(button_pin1) == GPIO.HIGH:
+                send_whatsapp_message()
+                time.sleep(1)  # Prevent multiple messages from being sent rapidly
+            # Process camera stream
             img_resp = urllib.request.urlopen(url)
             imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
             img = cv2.imdecode(imgnp, -1)
@@ -292,9 +278,8 @@ if __name__ == "__main__":
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
-        except Exception as e:
-            print(f"Error processing stream: {e}")
-            speak("Error in processing camera stream.")
-            break
-
-    cv2.destroyAllWindows()
+    except KeyboardInterrupt:
+        print("Exiting...")
+    finally:
+        GPIO.cleanup()
+        cv2.destroyAllWindows()
