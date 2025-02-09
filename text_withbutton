@@ -8,11 +8,8 @@ from gtts import gTTS
 import pygame  # For playing the audio
 import RPi.GPIO as GPIO  # For GPIO control (Raspberry Pi)
 
-# Set the path for Tesseract OCR executable
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
 # ESP32-CAM streaming URL (Replace with your ESP32-CAM IP)
-ESP32_CAM_URL = 'http://192.168.1.16/cam-hi.jpg'
+ESP32_CAM_URL = 'http://192.168.88.9/cam-hi.jpg'
 
 # Minimum confidence threshold for detected text
 CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
@@ -118,10 +115,13 @@ def speak_lines(lines):
 # Main function
 def main():
     print("Waiting for button press to start...")
+    button_pressed = False  # Track button press state
+
     while True:
         # Check if the button is pressed (GPIO pin is LOW)
-        if GPIO.input(BUTTON_PIN) == GPIO.LOW:
+        if GPIO.input(BUTTON_PIN) == GPIO.LOW and not button_pressed:
             print("Button pressed! Capturing image and processing text...")
+            button_pressed = True  # Set flag to indicate button is pressed
 
             # Capture image from ESP32-CAM
             image = capture_image_from_cam(ESP32_CAM_URL)
@@ -141,8 +141,10 @@ def main():
                 else:
                     print("No confident text detected.")
 
-            # Wait for a short time to debounce the button
-            time.sleep(0.5)
+        # Reset the button state when the button is released
+        if GPIO.input(BUTTON_PIN) == GPIO.HIGH and button_pressed:
+            button_pressed = False  # Reset flag when button is released
+            print("Button released. Ready for next press.")
 
         # Exit the loop if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord('q'):
