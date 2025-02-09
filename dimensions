@@ -1,0 +1,13 @@
+import pickle
+
+# Load the trained model
+with open("model.pkl", "rb") as model_file:
+    clf = pickle.load(model_file)
+
+# Extract coefficients and intercept
+coefficients = clf.coef_[0]  # Get the coefficients for the features
+intercept = clf.intercept_[0]  # Get the intercept
+
+# Print out the coefficients and intercept
+print("Coefficients:", coefficients)
+print("Intercept:", intercept)
