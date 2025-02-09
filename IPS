@@ -1,0 +1,88 @@
+#include <ESP8266WiFi.h>
+
+#define MAX_NETWORKS 3
+#define MIN_RSSI -80
+
+double features[MAX_NETWORKS];          // To store RSSI values
+String knownNetworks[MAX_NETWORKS] = {  // Known Wi-Fi networks (3 access points)
+    "TP-LINK_73FA4D",
+    "Ahmad Ghanem",
+    "Ahmad"
+};
+
+// Model parameters (replace these with actual trained coefficients and intercept)
+double coefficients[MAX_NETWORKS] = { -0.42068945,0.0134977,0.03824623};  // Example coefficients for each feature
+double intercept = 14.986179274889768; // Example intercept (replace with the actual one)
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();  // Disconnect from any Wi-Fi network
+
+    Serial.println("ESP8266 Wi-Fi Positioning System");
+}
+
+void loop() {
+    scan();
+    int roomPrediction = predictRoom(features);
+    
+    // Print the predicted room
+    Serial.print("Predicted Room: ");
+    Serial.println(roomPrediction);
+
+    delay(1000);  // Delay before scanning again
+}
+
+void scan() {
+    int numNetworks = WiFi.scanNetworks();
+    
+    resetFeatures();
+
+    // Assign RSSI values to the feature vector
+    for (int i = 0; i < numNetworks; i++) {
+        String ssid = WiFi.SSID(i);
+        int networkIndex = getNetworkIndex(ssid);
+
+        // Update the feature vector if the SSID is one of the known access points
+        if (networkIndex >= 0) {
+            int rssi = WiFi.RSSI(i);
+            features[networkIndex] = (rssi > MIN_RSSI) ? 80 + rssi : 0;  // Normalize RSSI
+        }
+    }
+}
+
+// Reset all features to 0
+void resetFeatures() {
+    for (int i = 0; i < MAX_NETWORKS; i++) {
+        features[i] = 0;
+    }
+}
+
+// Find the index of the network in the known networks list
+int getNetworkIndex(String ssid) {
+    for (int i = 0; i < MAX_NETWORKS; i++) {
+        if (knownNetworks[i] == ssid) {
+            return i;
+        }
+    }
+    return -1;  // Return -1 if the SSID is not found
+}
+
+// Perform prediction using the SVM model (linear classifier)
+int predictRoom(double features[MAX_NETWORKS]) {
+    double sum = intercept;
+
+    // SVM calculation: sum(features * coefficients) + intercept
+    for (int i = 0; i < MAX_NETWORKS; i++) {
+        sum += features[i] * coefficients[i];
+    }
+
+    // Apply a threshold to decide the room (this is a simple linear decision boundary)
+    if (sum > 0) {
+        return 1; // Room 1
+    } else if (sum < 0) {
+        return 2; // Room 2
+    } else {
+        return 3; // Room 3
+    }
+}
