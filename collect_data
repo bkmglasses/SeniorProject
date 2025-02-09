@@ -1,6 +1,6 @@
 #include <ESP8266WiFi.h>
 
-#define MAX_NETWORKS 5
+#define MAX_NETWORKS 3
 #define MIN_RSSI -80
 
 double features[MAX_NETWORKS];          // To store RSSI values
