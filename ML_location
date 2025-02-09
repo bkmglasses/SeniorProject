@@ -1,0 +1,48 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score
+
+# Load the data
+data = pd.read_csv(r"C:\Users\marya\OneDrive\Desktop\data.csv", delimiter=",")  # Adjust the delimiter if necessary (could be comma or tab)
+print("Data loaded successfully.")
+print("First few rows of data:", data.head())
+
+# Strip any extra spaces from column names
+data.columns = data.columns.str.strip()  # Stripping spaces
+
+# Check column names to ensure correct ones are loaded
+print("Columns after stripping:", data.columns)
+
+# If 'Room' column is found, separate features and labels
+if "Room" in data.columns:
+    # Drop the 'Room' column for features (X) and keep it as the target (y)
+    X = data.drop("Room", axis=1)  # Features (RSSI1, RSSI2, RSSI3)
+    y = data["Room"]  # Target (Room)
+    print("Features data (X):", X.head())
+    print("Room labels (y):", y.head())
+else:
+    print("Error: 'Room' column not found.")
+    exit(1)
+
+# Split the data into training and testing sets (80% training, 20% testing)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train a Support Vector Classifier (SVC) model
+clf = SVC(kernel='linear', gamma=0.001, tol=1e-4)
+clf.fit(X_train, y_train)
+
+# Make predictions on the test set
+y_pred = clf.predict(X_test)
+
+# Calculate accuracy
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Accuracy of the model: {accuracy * 100:.2f}%")
+
+# If you want to save the trained model, you can use pickle
+import pickle
+
+# Save the model to a file
+with open("model.pkl", "wb") as model_file:
+    pickle.dump(clf, model_file)
+    print("Model saved as 'model.pkl'")
