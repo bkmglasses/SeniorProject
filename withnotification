@@ -27,7 +27,7 @@ firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # Paths
-url = "http://192.168.88.4/cam-hi.jpg"
+url = "http://192.168.88.6/cam-hi.jpg"
 model_path = "keras_model.tflite"
 labels_path = "labels.txt"
 attendance_folder = "attendance"
@@ -63,7 +63,7 @@ button_pin = 26  # Change to your button pin
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
-# ðŸ”Š Function to speak text
+# Ã°Å¸â€Å  Function to speak text
 def speak(text):
     try:
         tts = gTTS(text=text, lang="en")
@@ -76,10 +76,10 @@ def speak(text):
 def speak_thread(text):
     speak(text)
 
-# ðŸ“¸ **Function to scan QR code**
+# Ã°Å¸â€œÂ¸ **Function to scan QR code**
 def scan_qr():
     global qr_scanned, user_id
-    print("ðŸ“¢ Waiting for QR Code scan...")
+    print("Ã°Å¸â€œÂ¢ Waiting for QR Code scan...")
     speak("Waiting for QR Code scan.")
 
     prev = ""
@@ -93,7 +93,7 @@ def scan_qr():
             for obj in decodedObjects:
                 pres = obj.data.decode("utf-8")
                 if prev != pres:
-                    print(f"âœ… QR Code Detected: {pres}")
+                    print(f"Ã¢Å“â€¦ QR Code Detected: {pres}")
                     speak("QR code detected.")
                     prev = pres
                     user_id = pres  # Assuming QR code contains user ID
@@ -104,12 +104,12 @@ def scan_qr():
             if cv2.waitKey(1) & 0xFF == 27:
                 break
         except Exception as e:
-            print(f"âŒ QR Scan Error: {e}")
+            print(f"Ã¢ÂÅ’ QR Scan Error: {e}")
             speak("QR scan failed. Please try again.")
 
     cv2.destroyAllWindows()
 
-# ðŸ“ **Function to Mark Attendance**
+# Ã°Å¸â€œÂ **Function to Mark Attendance**
 def markAttendance(name):
     try:
         df = pd.read_csv(attendance_file)
@@ -121,16 +121,16 @@ def markAttendance(name):
             new_entry = pd.DataFrame({"Name": [name], "Time": [dtString]})
             df = pd.concat([df, new_entry], ignore_index=True)
             df.to_csv(attendance_file, index=False)
-            print(f"âœ… Attendance Marked: {name} at {dtString}")
+            print(f"Ã¢Å“â€¦ Attendance Marked: {name} at {dtString}")
 
     except Exception as e:
-        print(f"âŒ Error saving attendance: {e}")
+        print(f"Ã¢ÂÅ’ Error saving attendance: {e}")
         speak("Error in saving attendance.")
 
-# ðŸ”„ **Function to load user images from Firebase**
+# Ã°Å¸â€â€ž **Function to load user images from Firebase**
 def load_images_from_firestore(user_id):
     images, classNames = [], []
-    print(f"ðŸ“¢ Fetching images for user: {user_id}")
+    print(f"Ã°Å¸â€œÂ¢ Fetching images for user: {user_id}")
     speak("Fetching user data from database.")
 
     photos_ref = db.collection("photos").where("userId", "==", user_id)
@@ -150,11 +150,11 @@ def load_images_from_firestore(user_id):
                 images.append(img)
                 classNames.append(name)
 
-    print(f"âœ… Loaded {len(images)} images for encoding.")
+    print(f"Ã¢Å“â€¦ Loaded {len(images)} images for encoding.")
     speak(f"Loaded {len(images)} images.")
     return images, classNames
 
-# ðŸŽ­ **Function to encode faces**
+# Ã°Å¸Å½Â­ **Function to encode faces**
 def findEncodings(images):
     encodings = []
     for img in images:
@@ -163,7 +163,7 @@ def findEncodings(images):
         if enc:
             encodings.append(enc[0])  # Only take first detected face
     
-    print(f"âœ… Encoded Faces: {len(encodings)}")
+    print(f"Ã¢Å“â€¦ Encoded Faces: {len(encodings)}")
     speak(f"Encoded {len(encodings)} faces.")
     return encodings
 
@@ -190,7 +190,7 @@ def detect_object(image):
         print(f"Error in object detection: {e}")
         return None, None
 
-# ðŸ” **Function to process frame for face recognition, text detection, and object detection**
+# Ã°Å¸â€Â **Function to process frame for face recognition, text detection, and object detection**
 def process_frame(img):
     global frame_count, last_name, last_speech_time
 
@@ -266,7 +266,7 @@ def button_listener():
                 last_press_time = current_time
         time.sleep(0.1)  # Polling interval
 
-# ðŸŽ¯ **Main program execution**
+# Ã°Å¸Å½Â¯ **Main program execution**
 if __name__ == "__main__":
     # Start button listener in a separate thread
     threading.Thread(target=button_listener, daemon=True).start()
@@ -275,12 +275,12 @@ if __name__ == "__main__":
     scan_qr()
 
     # Load user data
-    print(f"ðŸ“¢ Loading user data for: {user_id}")
+    print(f"Ã°Å¸â€œÂ¢ Loading user data for: {user_id}")
     images, classNames = load_images_from_firestore(user_id)
     encodeListKnown = findEncodings(images)
 
     if len(encodeListKnown) == 0:
-        print("âŒ No face encodings found! Face recognition will not work.")
+        print("Ã¢ÂÅ’ No face encodings found! Face recognition will not work.")
         speak("Error. No known faces detected.")
     else:
         speak("the system is active now .")
@@ -299,7 +299,7 @@ if __name__ == "__main__":
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
         except Exception as e:
-            print(f"âŒ Error processing stream: {e}")
+            print(f"Ã¢ÂÅ’ Error processing stream: {e}")
             speak("Error in processing camera stream.")
             break
 
