@@ -115,13 +115,15 @@ def speak_lines(lines):
 # Main function
 def main():
     print("Waiting for button press to start...")
-    button_pressed = False  # Track button press state
+    last_button_state = GPIO.input(BUTTON_PIN)  # Track the last button state
 
     while True:
-        # Check if the button is pressed (GPIO pin is LOW)
-        if GPIO.input(BUTTON_PIN) == GPIO.LOW and not button_pressed:
+        # Read the current button state
+        current_button_state = GPIO.input(BUTTON_PIN)
+
+        # Detect a falling edge (button press)
+        if current_button_state == GPIO.LOW and last_button_state == GPIO.HIGH:
             print("Button pressed! Capturing image and processing text...")
-            button_pressed = True  # Set flag to indicate button is pressed
 
             # Capture image from ESP32-CAM
             image = capture_image_from_cam(ESP32_CAM_URL)
@@ -141,17 +143,18 @@ def main():
                 else:
                     print("No confident text detected.")
 
-        # Reset the button state when the button is released
-        if GPIO.input(BUTTON_PIN) == GPIO.HIGH and button_pressed:
-            button_pressed = False  # Reset flag when button is released
-            print("Button released. Ready for next press.")
+            # Add a small delay to debounce the button
+            time.sleep(0.2)
+
+        # Update the last button state
+        last_button_state = current_button_state
 
         # Exit the loop if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord('q'):
             print("Exiting program...")
             break
 
-        time.sleep(0.1)  # Small delay to reduce CPU usage
+        time.sleep(0.05)  # Small delay to reduce CPU usage
 
     # Clean up GPIO and close OpenCV windows
     GPIO.cleanup()
