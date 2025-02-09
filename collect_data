@@ -1,0 +1,65 @@
+#include <ESP8266WiFi.h>
+
+#define MAX_NETWORKS 5
+#define MIN_RSSI -80
+
+double features[MAX_NETWORKS];          // To store RSSI values
+String knownNetworks[MAX_NETWORKS] = {  // Known Wi-Fi networks
+    "TP-LINK_73FA4D",
+    "Ahmad Ghanem",
+    "Ahmad"
+};
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+}
+
+void loop() {
+    scan();
+    printFeatures();
+    delay(100);
+}
+
+void scan() {
+    int numNetworks = WiFi.scanNetworks();
+
+    resetFeatures();
+
+    // Assign RSSIs to the feature vector
+    for (int i = 0; i < numNetworks; i++) {
+        String ssid = WiFi.SSID(i);
+        int networkIndex = getNetworkIndex(ssid);
+
+        // Only update feature if the current SSID is a known one
+        if (networkIndex >= 0) {
+            int rssi = WiFi.RSSI(i);
+            features[networkIndex] = (rssi > MIN_RSSI) ? 80 + rssi : 0;  // Normalize RSSI
+        }
+    }
+}
+
+// Reset all features to 0
+void resetFeatures() {
+    for (int i = 0; i < MAX_NETWORKS; i++) {
+        features[i] = 0;
+    }
+}
+
+// Find the index of the network in the known networks list
+int getNetworkIndex(String ssid) {
+    for (int i = 0; i < MAX_NETWORKS; i++) {
+        if (knownNetworks[i] == ssid) {
+            return i;
+        }
+    }
+    return -1;  // Return -1 if not found
+}
+
+void printFeatures() {
+    for (int i = 0; i < MAX_NETWORKS; i++) {
+        Serial.print(features[i]);
+        Serial.print((i == MAX_NETWORKS - 1) ? "\t3\n" : "\t");  // Fixed: Replaced invalid character
+    }
+}
