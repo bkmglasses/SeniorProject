@@ -1,225 +1,141 @@
 import cv2
 import numpy as np
 import urllib.request
-import pyzbar.pyzbar as pyzbar
-import threading
+import pytesseract
 import time
-import subprocess
-import firebase_admin
-from firebase_admin import credentials, firestore
-from gtts import gTTS
-from face_recognition import face_encodings, face_locations, face_distance
-from tflite_runtime.interpreter import Interpreter
-import RPi.GPIO as GPIO
-import base64
 import os
+from gtts import gTTS
+import pygame  # For playing the audio
 
-# Ensure TensorFlow uses CPU only
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+# Automatically detect Tesseract OCR executable path
+pytesseract.pytesseract.tesseract_cmd = "tesseract"
 
-# Firebase Initialization
-cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
+# ESP32-CAM streaming URL (Replace with your ESP32-CAM IP)
+ESP32_CAM_URL = 'http://192.168.1.16/cam-hi.jpg'  
 
-# Camera URL
-url = "http://192.168.88.12/cam-hi.jpg"
+# Minimum confidence threshold for detected text
+CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
 
-# Load TensorFlow Lite Model
-model_path = "keras_model.tflite"
-interpreter = Interpreter(model_path=model_path)
-interpreter.allocate_tensors()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+# Initialize pygame mixer for playing audio
+pygame.mixer.init()
 
-# Global Variables
-encodeListKnown = []
-classNames = []
-qr_scanned = False
-user_id = None
-system_ready = False
-
-# GPIO Setup
-button_pin = 26  # Button for Firestore Notification
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-
-# **Speech Function**
-def speak(text):
+# Function to capture an image from ESP32-CAM
+def capture_image_from_cam(url):
     try:
-        tts = gTTS(text=text, lang="en")
-        tts.save("temp_audio.mp3")
-        subprocess.Popen(["mpg321", "temp_audio.mp3"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)  # Prevents overlapping audio issues
+        response = urllib.request.urlopen(url)
+        image_array = np.array(bytearray(response.read()), dtype=np.uint8)
+        image = cv2.imdecode(image_array, -1)
+
+        if image is None:
+            print("Error: Could not retrieve image from ESP32-CAM.")
+            return None
+        return image
     except Exception as e:
-        print(f"Error with gTTS speech: {e}")
+        print(f"Error fetching image from ESP32-CAM: {e}")
+        return None
 
-# **QR Code Scanning**
-def scan_qr():
-    global qr_scanned, user_id, system_ready
-    print("Waiting for QR Code scan...")
-    speak("Waiting for QR Code scan.")
+# Function to preprocess the image for text recognition
+def preprocess_image(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)  # Apply Gaussian blur
 
-    while not qr_scanned:
-        try:
-            img_resp = urllib.request.urlopen(url)
-            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-            frame = cv2.imdecode(imgnp, -1)
+    # Apply adaptive thresholding for better OCR accuracy
+    processed_image = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    return processed_image
 
-            decodedObjects = pyzbar.decode(frame)
-            for obj in decodedObjects:
-                user_id = obj.data.decode("utf-8")
-                print(f"QR Code Detected: {user_id}")
-                speak("QR code detected.")
-                qr_scanned = True
-                break
+# Function to recognize text line by line
+def recognize_text_line_by_line(image):
+    config = "--psm 6 --oem 3"  # Tesseract OCR configuration
+    data = pytesseract.image_to_data(image, config=config, lang="eng", output_type=pytesseract.Output.DICT)
 
-            cv2.imshow("QR Scan", frame)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-        except Exception as e:
-            print(f"QR Scan Error: {e}")
-            speak("QR scan failed. Please try again.")
+    # Store lines of text
+    lines = []
+    current_line = []
+    last_line_num = -1  # Track the last processed line number
 
-    cv2.destroyAllWindows()
-    load_faces_from_firestore()
-    system_ready = True  # System now starts face detection
+    for i in range(len(data["text"])):
+        word = data["text"][i].strip()
+        confidence = int(data["conf"][i])
+        line_num = data["line_num"][i]  # Get the line number
 
-# **Load User Faces from Firebase**
-def load_faces_from_firestore():
-    global encodeListKnown, classNames
-    images, classNames = [], []
+        if word and confidence >= CONFIDENCE_THRESHOLD:
+            if line_num != last_line_num and current_line:
+                lines.append(" ".join(current_line))
+                current_line = []  # Reset for new line
+            current_line.append(word)
+            last_line_num = line_num
 
-    print(f"Fetching images for user: {user_id}")
-    speak("Fetching user data from database.")
+    if current_line:
+        lines.append(" ".join(current_line))  # Add the last line
 
-    photos_ref = db.collection("photos").where("userId", "==", user_id)
-    docs = list(photos_ref.stream())
+    return lines
 
-    if not docs:
-        print("No images found in Firestore for this user.")
-        speak("Error, no images found.")
-        return
+# Function to convert text lines to speech using gTTS and play them one by one
+def speak_lines(lines):
+    for line in lines:
+        if line:
+            print(f"Reading Line: {line}")
 
-    for doc in docs:
-        data = doc.to_dict()
-        base64_image = data.get("image")
-        name = data.get("description")
+            try:
+                # Convert line to speech
+                tts = gTTS(text=line, lang='en')
+                
+                # Save the speech to a temporary file
+                temp_filename = "temp_audio.mp3"
+                tts.save(temp_filename)
+                
+                # Play the audio using pygame
+                pygame.mixer.music.load(temp_filename)
+                pygame.mixer.music.play()
 
-        if base64_image and name:
-            img_data = base64.b64decode(base64_image)
-            nparr = np.frombuffer(img_data, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                # Wait until the speech finishes playing
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.5)
 
-            if img is not None:
-                images.append(img)
-                classNames.append(name)
+                # Stop playback and unload the file before deleting
+                pygame.mixer.music.stop()
+                pygame.mixer.quit()  # Ensure pygame releases the file
+                
+                # Delete the file after playing
+                os.remove(temp_filename)
 
-    encodeListKnown = encode_faces(images)
-    print(f"Loaded {len(images)} images for encoding.")
-    speak(f"Loaded {len(images)} faces.")
+                # Reinitialize pygame for next playback
+                pygame.mixer.init()
 
-# **Encode Faces**
-def encode_faces(images):
-    encodings = []
-    for img in images:
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        enc = face_encodings(img_rgb)
-        if enc:
-            encodings.append(enc[0])
-    return encodings
+            except Exception as e:
+                print(f"Error in text-to-speech conversion: {e}")
 
-# **Object Detection**
-def detect_object(image):
-    try:
-        img_resized = cv2.resize(image, (224, 224))
-        input_data = np.asarray(img_resized, dtype=np.float32).reshape(1, 224, 224, 3) / 127.5 - 1
-        interpreter.set_tensor(input_details[0]['index'], input_data)
-        interpreter.invoke()
-        output_data = np.copy(interpreter.get_tensor(output_details[0]['index']))
-        return np.argmax(output_data[0]), output_data[0]
-    except Exception as e:
-        print(f"Error in object detection: {e}")
-        return None, None
-
-# **Send Notification to Firestore**
-def send_notification_to_firestore():
-    if not user_id:
-        print("Error: User ID is not available. Scan QR code first!")
-        return
-    
-    try:
-        notification_ref = db.collection('notifications').document()
-        notification_ref.set({
-            'user_id': user_id,
-            'message': 'Call me back',
-            'timestamp': firestore.SERVER_TIMESTAMP
-        })
-        print(f"Notification sent to Firestore under User ID: {user_id}")
-    except Exception as e:
-        print(f"Error sending notification to Firestore: {e}")
-
-# **Monitor Button for Firestore Notification**
-def button_listener():
-    last_press_time = 0
-    debounce_time = 2
-
+# Main function
+def main():
     while True:
-        if GPIO.input(button_pin) == GPIO.HIGH:
-            current_time = time.time()
-            if current_time - last_press_time > debounce_time:
-                send_notification_to_firestore()
-                last_press_time = current_time
-        time.sleep(0.1)
+        # Capture image from ESP32-CAM
+        image = capture_image_from_cam(ESP32_CAM_URL)
 
-# **Process Face & Object Detection**
-def process_stream():
-    global system_ready
+        if image is not None:
+            # Display the live feed
+            cv2.imshow("Live Camera Feed", image)
 
-    while True:
-        if not system_ready:
-            time.sleep(1)
-            continue
+            # Preprocess the image
+            processed_image = preprocess_image(image)
 
-        try:
-            img_resp = urllib.request.urlopen(url)
-            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-            img = cv2.imdecode(imgnp, -1)
-            img = cv2.resize(img, (640, 480))
+            # Recognize text line by line
+            detected_lines = recognize_text_line_by_line(processed_image)
 
-            # Face Detection
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            faces = face_locations(img_rgb, model="hog")
-            encodesCurFrame = face_encodings(img_rgb, faces)
+            if detected_lines:
+                speak_lines(detected_lines)  # Read text aloud, line by line
+            else:
+                print("No confident text detected.")
 
-            for encodeFace, faceLoc in zip(encodesCurFrame, faces):
-                faceDist = face_distance(encodeListKnown, encodeFace)
-                matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
-                name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.4 else "UNKNOWN"
+        # Exit the loop if 'q' is pressed
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("Exiting program...")
+            break
 
-                if name != "UNKNOWN":
-                    speak(f"{name} detected.")
-
-            # Object Detection
-            obj_index, prediction = detect_object(img)
-            if obj_index is not None:
-                class_name = class_names[obj_index].strip()
-                confidence_score = prediction[obj_index]
-                if confidence_score >= 0.91:
-                    print(f"Object Detected: {class_name} (Confidence: {confidence_score:.2f})")
-                    speak(f"{class_name} Detected")
-
-            cv2.imshow("Camera Stream", img)
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-        except Exception as e:
-            print(f"Error processing stream: {e}")
+        time.sleep(2)  # Small delay before next capture
 
     cv2.destroyAllWindows()
 
-# **Main Execution**
 if __name__ == "__main__":
-    threading.Thread(target=button_listener, daemon=True).start()
-    scan_qr()
-    threading.Thread(target=process_stream).start()
+    main()
