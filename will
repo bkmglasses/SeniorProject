@@ -20,6 +20,7 @@ import time
 import pytesseract
 import pygame  # For playing the audio
 
+
 # Ensure TensorFlow uses CPU only
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
@@ -38,11 +39,8 @@ interpreter = Interpreter(model_path=model_path)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-
 # Global flag to control modes
 text_reading_mode = False
-camera_lock = threading.Lock()  # Lock for camera access
-
 # Load labels
 with open(labels_path, "r") as file:
     class_names = file.readlines()
@@ -59,14 +57,12 @@ frame_count = 0
 
 # GPIO Setup
 button_pin_note = 26  # Change to your button pin
-button_pin_text = 6
-button_pin_exit_text = 5  # New button to exit text reading mode
+button_pin_text = 6 
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(button_pin_note, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(button_pin_text, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(button_pin_exit_text, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
-# Function to speak text
+# Ã°Å¸â€Å  Function to speak text
 def speak(text):
     try:
         tts = gTTS(text=text, lang="en")
@@ -79,10 +75,10 @@ def speak(text):
 def speak_thread(text):
     speak(text)
 
-# Function to scan QR code
+# Ã°Å¸â€œÂ¸ **Function to scan QR code**
 def scan_qr():
     global qr_scanned, user_id
-    print("Waiting for QR Code scan...")
+    print("Ã°Å¸â€œÂ¢ Waiting for QR Code scan...")
     speak("Waiting for QR Code scan.")
 
     prev = ""
@@ -96,7 +92,7 @@ def scan_qr():
             for obj in decodedObjects:
                 pres = obj.data.decode("utf-8")
                 if prev != pres:
-                    print(f"QR Code Detected: {pres}")
+                    print(f"Ã¢Å“â€¦ QR Code Detected: {pres}")
                     speak("QR code detected.")
                     prev = pres
                     user_id = pres  # Assuming QR code contains user ID
@@ -107,15 +103,15 @@ def scan_qr():
             if cv2.waitKey(1) & 0xFF == 27:
                 break
         except Exception as e:
-            print(f"QR Scan Error: {e}")
+            print(f"Ã¢ÂÅ’ QR Scan Error: {e}")
             speak("QR scan failed. Please try again.")
 
     cv2.destroyAllWindows()
 
-# Function to load user images from Firebase
+# Ã°Å¸â€â€ž **Function to load user images from Firebase**
 def load_images_from_firestore(user_id):
     images, classNames = [], []
-    print(f"Fetching images for user: {user_id}")
+    print(f"Ã°Å¸â€œÂ¢ Fetching images for user: {user_id}")
     speak("Fetching user data from database.")
 
     photos_ref = db.collection("photos").where("userId", "==", user_id)
@@ -135,11 +131,11 @@ def load_images_from_firestore(user_id):
                 images.append(img)
                 classNames.append(name)
 
-    print(f"Loaded {len(images)} images for encoding.")
+    print(f"Ã¢Å“â€¦ Loaded {len(images)} images for encoding.")
     speak(f"Loaded {len(images)} images.")
     return images, classNames
 
-# Function to encode faces
+# Ã°Å¸Å½Â­ **Function to encode faces**
 def findEncodings(images):
     encodings = []
     for img in images:
@@ -147,8 +143,8 @@ def findEncodings(images):
         enc = face_encodings(img_rgb)
         if enc:
             encodings.append(enc[0])  # Only take first detected face
-
-    print(f"Encoded Faces: {len(encodings)}")
+    
+    print(f"Ã¢Å“â€¦ Encoded Faces: {len(encodings)}")
     speak(f"Encoded {len(encodings)} faces.")
     return encodings
 
@@ -175,7 +171,7 @@ def detect_object(image):
         print(f"Error in object detection: {e}")
         return None, None
 
-# Function to process frame for face recognition, text detection, and object detection
+# Ã°Å¸â€Â **Function to process frame for face recognition, text detection, and object detection**
 def process_frame(img):
     global frame_count, last_name, last_speech_time
 
@@ -204,7 +200,7 @@ def process_frame(img):
         faceDist = face_distance(encodeListKnown, encodeFace)
         matchIndex = np.argmin(faceDist) if faceDist.size > 0 else -1
         name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.4 else "UNKNOWN"
-
+        
         # Only process and speak when the name is different from the last name or if enough time has passed
         current_time = datetime.now()
         if name != "UNKNOWN" and (name != last_name or last_speech_time is None or (current_time - last_speech_time).seconds >= speech_delay):
@@ -224,14 +220,15 @@ def process_frame(img):
     gc.collect()
 
 # Function to send notification to Firestore
+# Function to send notification to Firestore (Linked to User ID)
 def send_notification_to_firestore():
     global user_id  # Use the user_id obtained from QR scan
 
     if not user_id:
-        print("Error: User ID is not available. Scan QR code first!")
+        print("? Error: User ID is not available. Scan QR code first!")
         return
-
-    print(f"Button pressed! Sending notification for User ID: {user_id} to Firestore...")
+    
+    print(f"?? Button pressed! Sending notification for User ID: {user_id} to Firestore...")
 
     try:
         # Create a notification reference under the specific user ID
@@ -241,11 +238,10 @@ def send_notification_to_firestore():
             'message': 'Call me back',
             'timestamp': firestore.SERVER_TIMESTAMP
         })
-        print(f"Notification sent to Firestore under User ID: {user_id}")
-
+        print(f"? Notification sent to Firestore under User ID: {user_id}")
+    
     except Exception as e:
-        print(f"Error sending notification to Firestore: {e}")
-
+        print(f"? Error sending notification to Firestore: {e}")
 # Function to monitor the button state with debouncing
 def button_listener_note():
     last_press_time = 0
@@ -258,7 +254,6 @@ def button_listener_note():
                 send_notification_to_firestore()
                 last_press_time = current_time
         time.sleep(0.1)  # Polling interval
-
 def button_listener_text():
     global text_reading_mode
     last_press_time = 0
@@ -276,23 +271,6 @@ def button_listener_text():
                     print("Exiting text reading mode...")
                 last_press_time = current_time
         time.sleep(0.1)  # Polling interval
-
-def button_listener_exit_text():
-    global text_reading_mode
-    last_press_time = 0
-    debounce_time = 2  # Debounce time in seconds
-
-    while True:
-        if GPIO.input(button_pin_exit_text) == GPIO.HIGH:
-            current_time = time.time()
-            if current_time - last_press_time > debounce_time:
-                if text_reading_mode:
-                    print("Exiting text reading mode...")
-                    text_reading_mode = False  # Exit text reading mode
-                    speak("Exiting text reading mode.")
-                last_press_time = current_time
-        time.sleep(0.1)  # Polling interval
-
 def text_main():
     global text_reading_mode
     speak("Start text reading.")
@@ -300,50 +278,47 @@ def text_main():
 
     try:
         while text_reading_mode:  # Only run while in text reading mode
-            with camera_lock:  # Ensure exclusive access to the camera
-                # Capture image from ESP32-CAM
-                image = capture_image_from_cam(ESP32_CAM_URL)
-                if image is not None:
-                    image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)  # Rotate 90 degrees
+            # Capture image from ESP32-CAM
+            image = capture_image_from_cam(ESP32_CAM_URL)
+            if image is not None:
+                image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)  # Rotate 90 degrees
 
-                    # Display the live feed
-                    cv2.imshow("Text Reading Mode", image)
+                # Display the live feed
+                cv2.imshow("Text Reading Mode", image)
 
-                    # Preprocess the image
-                    processed_image = preprocess_image(image)
+                # Preprocess the image
+                processed_image = preprocess_image(image)
 
-                    # Recognize text line by line
-                    detected_lines = recognize_text_line_by_line(processed_image)
+                # Recognize text line by line
+                detected_lines = recognize_text_line_by_line(processed_image)
 
-                    if detected_lines:
-                        speak_lines(detected_lines)  # Read text aloud, line by line
-                    else:
-                        print("No confident text detected.")
+                if detected_lines:
+                    speak_lines(detected_lines)  # Read text aloud, line by line
+                else:
+                    print("No confident text detected.")
 
-                # Exit the loop if 'q' is pressed or text_reading_mode is False
-                if cv2.waitKey(1) & 0xFF == ord('q') or not text_reading_mode:
-                    print("Exiting text reading...")
-                    break
+            # Exit the loop if 'q' is pressed
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("Exiting text reading...")
+                break
 
-                time.sleep(2)  # Small delay before next capture
+            time.sleep(2)  # Small delay before next capture
 
     finally:
         cv2.destroyAllWindows()  # Ensure OpenCV windows are closed
         text_reading_mode = False  # Exit text reading mode
         speak("Text reading stopped.")
-
 # Automatically detect Tesseract OCR executable path
 pytesseract.pytesseract.tesseract_cmd = "tesseract"
 
 # ESP32-CAM streaming URL (Replace with your ESP32-CAM IP)
-ESP32_CAM_URL = 'http://192.168.88.6/cam-hi.jpg'
+ESP32_CAM_URL = 'http://192.168.88.6/cam-hi.jpg'  
 
 # Minimum confidence threshold for detected text
 CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
 
 # Initialize pygame mixer for playing audio
 pygame.mixer.init()
-
 def capture_image_from_cam(url):
     try:
         response = urllib.request.urlopen(url)
@@ -405,11 +380,11 @@ def speak_lines(lines):
             try:
                 # Convert line to speech
                 tts = gTTS(text=line, lang='en')
-
+                
                 # Save the speech to a temporary file
                 temp_filename = "temp_audio.mp3"
                 tts.save(temp_filename)
-
+                
                 # Play the audio using pygame
                 pygame.mixer.music.load(temp_filename)
                 pygame.mixer.music.play()
@@ -421,7 +396,7 @@ def speak_lines(lines):
                 # Stop playback and unload the file before deleting
                 pygame.mixer.music.stop()
                 pygame.mixer.quit()  # Ensure pygame releases the file
-
+                
                 # Delete the file after playing
                 os.remove(temp_filename)
 
@@ -431,38 +406,39 @@ def speak_lines(lines):
             except Exception as e:
                 print(f"Error in text-to-speech conversion: {e}")
 
+
+# Ã°Å¸Å½Â¯ **Main program execution**
 if __name__ == "__main__":
-    # Start button listeners in separate threads
+    # Start button listener in a separate thread
     threading.Thread(target=button_listener_note, daemon=True).start()
     threading.Thread(target=button_listener_text, daemon=True).start()
-    threading.Thread(target=button_listener_exit_text, daemon=True).start()  # Add this line
 
     # Scan QR Code
     scan_qr()
 
     # Load user data
-    print(f"Loading user data for: {user_id}")
+    print(f"Ã°Å¸â€œÂ¢ Loading user data for: {user_id}")
     images, classNames = load_images_from_firestore(user_id)
     encodeListKnown = findEncodings(images)
 
     if len(encodeListKnown) == 0:
-        print("No face encodings found! Face recognition will not work.")
+        print("Ã¢ÂÅ’ No face encodings found! Face recognition will not work.")
         speak("Error. No known faces detected.")
     else:
-        speak("The system is active now.")
+        speak("the system is active now .")
 
     # Start face recognition
+    # Main loop
     while True:
         try:
             if not text_reading_mode:  # Only run face/object detection if not in text reading mode
-                with camera_lock:  # Ensure exclusive access to the camera
-                    img_resp = urllib.request.urlopen(url)
-                    imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-                    img = cv2.imdecode(imgnp, -1)
-                    img = cv2.resize(img, (640, 480))
-                    img = cv2.transpose(img)
-                    img = cv2.flip(img, flipCode=0)
-                    process_frame(img)
+                img_resp = urllib.request.urlopen(url)
+                imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+                img = cv2.imdecode(imgnp, -1)
+                img = cv2.resize(img, (640, 480))
+                img = cv2.transpose(img)
+                img = cv2.flip(img, flipCode=0)
+                process_frame(img)
 
             # Exit on 'q' key press
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -474,3 +450,4 @@ if __name__ == "__main__":
 
     cv2.destroyAllWindows()
     GPIO.cleanup()
+
