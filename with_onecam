@@ -1,0 +1,238 @@
+import cv2
+import numpy as np
+import urllib.request
+import pyzbar.pyzbar as pyzbar
+import pandas as pd
+from datetime import datetime
+from face_recognition import face_encodings, face_locations, face_distance
+from tflite_runtime.interpreter import Interpreter
+from gtts import gTTS
+import firebase_admin
+from firebase_admin import credentials, firestore
+import base64
+import os
+import gc
+import threading
+import subprocess
+from pytesseract import image_to_string
+import pygame
+import RPi.GPIO as GPIO
+import time
+
+# Ensure TensorFlow uses CPU only
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Firebase Initialization
+cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+# Paths
+url = "http://192.168.88.12/cam-hi.jpg"
+model_path = "keras_model.tflite"
+labels_path = "labels.txt"
+
+# Load TFLite model
+interpreter = Interpreter(model_path=model_path)
+interpreter.allocate_tensors()
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Load labels
+with open(labels_path, "r") as file:
+    class_names = file.readlines()
+
+# Global Variables
+encodeListKnown = []
+classNames = []
+qr_scanned = False
+user_id = None
+last_name = None
+last_speech_time = None
+speech_delay = 2  # Delay time in seconds to trigger speech again
+frame_count = 0
+
+# GPIO Setup
+button_pin = 26  # Button for Firestore Notification
+button_pin_text = 6  # Button for Text Reading
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(button_pin_text, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+# Initialize pygame for audio playback
+pygame.mixer.init()
+
+# Function to speak text
+def speak(text):
+    try:
+        tts = gTTS(text=text, lang="en")
+        tts.save("temp_audio.mp3")
+        subprocess.call(["mpg321", "temp_audio.mp3"])
+    except Exception as e:
+        print(f"Error with gTTS speech: {e}")
+
+# Function to scan QR code
+def scan_qr():
+    global qr_scanned, user_id
+    print("Waiting for QR Code scan...")
+    speak("Waiting for QR Code scan.")
+
+    while not qr_scanned:
+        try:
+            img_resp = urllib.request.urlopen(url)
+            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+            frame = cv2.imdecode(imgnp, -1)
+
+            decodedObjects = pyzbar.decode(frame)
+            for obj in decodedObjects:
+                user_id = obj.data.decode("utf-8")
+                print(f"QR Code Detected: {user_id}")
+                speak("QR code detected.")
+                qr_scanned = True
+                break
+
+            cv2.imshow("QR Scan", frame)
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+        except Exception as e:
+            print(f"QR Scan Error: {e}")
+            speak("QR scan failed. Please try again.")
+
+    cv2.destroyAllWindows()
+
+# Function to load user images from Firebase
+def load_images_from_firestore(user_id):
+    images, classNames = [], []
+    print(f"Fetching images for user: {user_id}")
+    speak("Fetching user data from database.")
+
+    photos_ref = db.collection("photos").where("userId", "==", user_id)
+    docs = photos_ref.stream()
+
+    for doc in docs:
+        data = doc.to_dict()
+        base64_image = data.get("image")
+        name = data.get("description")
+
+        if base64_image and name:
+            img_data = base64.b64decode(base64_image)
+            nparr = np.frombuffer(img_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+            if img is not None:
+                images.append(img)
+                classNames.append(name)
+
+    print(f"Loaded {len(images)} images for encoding.")
+    speak(f"Loaded {len(images)} images.")
+    return images, classNames
+
+# Function to encode faces
+def findEncodings(images):
+    encodings = []
+    for img in images:
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        enc = face_encodings(img_rgb)
+        if enc:
+            encodings.append(enc[0])
+    return encodings
+
+# Function to detect objects
+def detect_object(image):
+    try:
+        img_resized = cv2.resize(image, (224, 224))
+        input_data = np.asarray(img_resized, dtype=np.float32).reshape(1, 224, 224, 3) / 127.5 - 1
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        output_data = np.copy(interpreter.get_tensor(output_details[0]['index']))
+        return np.argmax(output_data[0]), output_data[0]
+    except Exception as e:
+        print(f"Error in object detection: {e}")
+        return None, None
+
+# Function to detect text using pytesseract
+def recognize_text(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return image_to_string(gray).strip()
+
+# Function to send notification to Firestore
+def send_notification_to_firestore():
+    if not user_id:
+        print("Error: User ID is not available. Scan QR code first!")
+        return
+    
+    try:
+        notification_ref = db.collection('notifications').document()
+        notification_ref.set({
+            'user_id': user_id,
+            'message': 'Call me back',
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
+        print(f"Notification sent to Firestore under User ID: {user_id}")
+    except Exception as e:
+        print(f"Error sending notification to Firestore: {e}")
+
+# Function to monitor the notification button
+def button_listener():
+    last_press_time = 0
+    debounce_time = 2
+
+    while True:
+        if GPIO.input(button_pin) == GPIO.HIGH:
+            current_time = time.time()
+            if current_time - last_press_time > debounce_time:
+                send_notification_to_firestore()
+                last_press_time = current_time
+        time.sleep(0.1)
+
+# Function to monitor the text reading button
+def button_text():
+    last_press_time = 0
+    debounce_time = 2
+
+    while True:
+        if GPIO.input(button_pin_text) == GPIO.HIGH:
+            current_time = time.time()
+            if current_time - last_press_time > debounce_time:
+                speak_text_from_camera()
+                last_press_time = current_time
+        time.sleep(0.1)
+
+# Function to capture and read text aloud
+def speak_text_from_camera():
+    try:
+        img_resp = urllib.request.urlopen(url)
+        imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+        img = cv2.imdecode(imgnp, -1)
+        detected_text = recognize_text(img)
+        
+        if detected_text:
+            speak(detected_text)
+        else:
+            speak("No text detected.")
+    except Exception as e:
+        print(f"Error in text recognition: {e}")
+
+# Main execution
+if __name__ == "__main__":
+    threading.Thread(target=button_listener, daemon=True).start()
+    threading.Thread(target=button_text, daemon=True).start()
+
+    scan_qr()
+    images, classNames = load_images_from_firestore(user_id)
+    encodeListKnown = findEncodings(images)
+    speak("The system is now active.")
+
+    while True:
+        try:
+            img_resp = urllib.request.urlopen(url)
+            imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+            img = cv2.imdecode(imgnp, -1)
+            cv2.imshow("Camera Stream", img)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+        except Exception as e:
+            print(f"Error processing stream: {e}")
+
+    cv2.destroyAllWindows()
+    GPIO.cleanup()
