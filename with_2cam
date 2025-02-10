@@ -29,7 +29,7 @@ db = firestore.client()
 # Camera URLs
 camera_urls = [
     "http://192.168.88.6/cam-hi.jpg",  # Main camera (QR Scanner + Face & Object Detection) [FLIP RIGHT]
-    "http://192.168.88.7/cam-hi.jpg",  # Secondary camera (Face & Object Detection) [FLIP LEFT]
+    "http://192.168.88.12/cam-hi.jpg",  # Secondary camera (Face & Object Detection) [FLIP LEFT]
 ]
 
 # Paths
@@ -58,6 +58,7 @@ encodeListKnown = []
 classNames = []
 qr_scanned = False
 user_id = None
+system_ready = False  # System will start only after QR scan
 last_name = None
 last_speech_time = None
 speech_delay = 2  # Delay time in seconds
@@ -77,9 +78,9 @@ def speak(text):
     except Exception as e:
         print(f"Error with gTTS speech: {e}")
 
-# Function to scan QR code (Only from the first camera)
+# **Function to scan QR code (Runs first, before any other function)**
 def scan_qr():
-    global qr_scanned, user_id
+    global qr_scanned, user_id, system_ready
     print("Waiting for QR Code scan...")
     speak("Waiting for QR Code scan.")
 
@@ -114,11 +115,27 @@ def scan_qr():
 
     cv2.destroyAllWindows()
 
-# Function to process face & object detection
+    # Load user data only after successful QR scanning
+    images, classNames = load_images_from_firestore(user_id)
+    global encodeListKnown
+    encodeListKnown = findEncodings(images)
+
+    if len(encodeListKnown) == 0:
+        print("Error: No face data found! System will not start face recognition.")
+        speak("Error, no faces detected. Face recognition will not work.")
+    else:
+        speak("System is now active.")
+        system_ready = True  # Now allow face & object detection
+
+# **Function to process face & object detection**
 def process_camera_stream(url, flip_direction):
-    global frame_count, last_name, last_speech_time
+    global system_ready, last_name, last_speech_time
 
     while True:
+        if not system_ready:
+            time.sleep(1)  # Wait until system is ready
+            continue
+
         try:
             img_resp = urllib.request.urlopen(url)
             imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
@@ -143,7 +160,6 @@ def process_camera_stream(url, flip_direction):
                 name = classNames[matchIndex].upper() if matchIndex != -1 and faceDist[matchIndex] < 0.4 else "UNKNOWN"
 
                 if name != "UNKNOWN":
-                    markAttendance(name)
                     speak(f"{name} detected.")
 
             # Object Detection
@@ -177,32 +193,10 @@ def detect_object(image):
         print(f"Error in object detection: {e}")
         return None, None
 
-# Function to monitor button state and send notification
-def button_listener():
-    while True:
-        if GPIO.input(button_pin) == GPIO.HIGH:
-            send_notification_to_firestore()
-        time.sleep(0.1)  
-
-# Function to send notification to Firestore
-def send_notification_to_firestore():
-    try:
-        notification_ref = db.collection('notifications').document()
-        notification_ref.set({
-            'message': 'call me back',
-            'timestamp': firestore.SERVER_TIMESTAMP
-        })
-        print("Notification sent to Firestore.")
-    except Exception as e:
-        print(f"Error sending notification: {e}")
-
-# Main Execution
+# **Main Execution**
 if __name__ == "__main__":
-    threading.Thread(target=scan_qr).start()
-    threading.Thread(target=button_listener, daemon=True).start()
-    
-    images, classNames = load_images_from_firestore(user_id)
-    encodeListKnown = findEncodings(images)
+    scan_qr()  # **First scan QR before starting any other process**
 
+    # **Start face & object detection only after QR scanning**
     threading.Thread(target=process_camera_stream, args=(camera_urls[0], "right")).start()
     threading.Thread(target=process_camera_stream, args=(camera_urls[1], "left")).start()
