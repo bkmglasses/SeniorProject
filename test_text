@@ -1,0 +1,141 @@
+import cv2
+import numpy as np
+import urllib.request
+import pytesseract
+import time
+import os
+from gtts import gTTS
+import pygame  # For playing the audio
+
+# Set the path for Tesseract OCR executable
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# ESP32-CAM streaming URL (Replace with your ESP32-CAM IP)
+ESP32_CAM_URL = 'http://192.168.88.19/cam-hi.jpg'  
+
+# Minimum confidence threshold for detected text
+CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
+
+# Initialize pygame mixer for playing audio
+pygame.mixer.init()
+
+# Function to capture an image from ESP32-CAM
+def capture_image_from_cam(url):
+    try:
+        response = urllib.request.urlopen(url)
+        image_array = np.array(bytearray(response.read()), dtype=np.uint8)
+        image = cv2.imdecode(image_array, -1)
+
+        if image is None:
+            print("Error: Could not retrieve image from ESP32-CAM.")
+            return None
+        return image
+    except Exception as e:
+        print(f"Error fetching image from ESP32-CAM: {e}")
+        return None
+
+# Function to preprocess the image for text recognition
+def preprocess_image(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)  # Apply Gaussian blur
+
+    # Apply adaptive thresholding for better OCR accuracy
+    processed_image = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    return processed_image
+
+# Function to recognize text line by line
+def recognize_text_line_by_line(image):
+    config = "--psm 6 --oem 3"  # Tesseract OCR configuration
+    data = pytesseract.image_to_data(image, config=config, lang="eng", output_type=pytesseract.Output.DICT)
+
+    # Store lines of text
+    lines = []
+    current_line = []
+    last_line_num = -1  # Track the last processed line number
+
+    for i in range(len(data["text"])):
+        word = data["text"][i].strip()
+        confidence = int(data["conf"][i])
+        line_num = data["line_num"][i]  # Get the line number
+
+        if word and confidence >= CONFIDENCE_THRESHOLD:
+            if line_num != last_line_num and current_line:
+                lines.append(" ".join(current_line))
+                current_line = []  # Reset for new line
+            current_line.append(word)
+            last_line_num = line_num
+
+    if current_line:
+        lines.append(" ".join(current_line))  # Add the last line
+
+    return lines
+
+# Function to convert text lines to speech using gTTS and play them one by one
+def speak_lines(lines):
+    for line in lines:
+        if line:
+            print(f"Reading Line: {line}")
+
+            try:
+                # Convert line to speech
+                tts = gTTS(text=line, lang='en')
+                
+                # Save the speech to a temporary file
+                temp_filename = "temp_audio.mp3"
+                tts.save(temp_filename)
+                
+                # Play the audio using pygame
+                pygame.mixer.music.load(temp_filename)
+                pygame.mixer.music.play()
+
+                # Wait until the speech finishes playing
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.5)
+
+                # Stop playback and unload the file before deleting
+                pygame.mixer.music.stop()
+                pygame.mixer.quit()  # Ensure pygame releases the file
+                
+                # Delete the file after playing
+                os.remove(temp_filename)
+
+                # Reinitialize pygame for next playback
+                pygame.mixer.init()
+
+            except Exception as e:
+                print(f"Error in text-to-speech conversion: {e}")
+
+# Main function
+def main():
+    while True:
+        # Capture image from ESP32-CAM
+        image = capture_image_from_cam(ESP32_CAM_URL)
+
+        if image is not None:
+            # Display the live feed
+            cv2.imshow("Live Camera Feed", image)
+
+            # Preprocess the image
+            processed_image = preprocess_image(image)
+
+            # Recognize text line by line
+            detected_lines = recognize_text_line_by_line(processed_image)
+
+            if detected_lines:
+                speak_lines(detected_lines)  # Read text aloud, line by line
+            else:
+                print("No confident text detected.")
+
+        # Exit the loop if 'q' is pressed
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("Exiting program...")
+            break
+
+        time.sleep(2)  # Small delay before next capture
+
+    cv2.destroyAllWindows()
+
+if _name_ == "_main_":
+    main()
