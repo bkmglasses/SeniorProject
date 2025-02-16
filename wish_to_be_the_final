@@ -44,7 +44,7 @@ labels_path = "labels.txt"
 # Automatically detect Tesseract OCR executable path
 pytesseract.pytesseract.tesseract_cmd = "tesseract"
 
-ESP32_CAM_URL = 'http://192.168.88.20/cam-hi.jpg'  # For text
+ESP32_CAM_URL = 'http://192.168.88.19/cam-hi.jpg'  # For text
 
 # Minimum confidence threshold for detected text
 CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
@@ -311,6 +311,7 @@ def button_listener_text():
                 text_reading_mode = not text_reading_mode  # Toggle mode
                 if text_reading_mode:
                     print("Entering text reading mode...")
+                    stop_thread_event.clear()  # Reset the event
                     threading.Thread(target=text_main, daemon=True).start()
                 else:
                     print("Exiting text reading mode...")
@@ -327,7 +328,8 @@ def text_main():
     try:
         while not stop_thread_event.is_set():
             # Capture image from ESP32-CAM
-            image = capture_image_from_cam(ESP32_CAM_URL)
+            with camera_lock:  # Ensure exclusive access to the camera
+                image = capture_image_from_cam(ESP32_CAM_URL)
 
             if image is not None:
                 # Display the live feed
@@ -421,7 +423,11 @@ def speak_lines(lines):
                 temp_filename = "temp_audio.mp3"
                 tts.save(temp_filename)
                 
-                # Play the audio using pygame
+                # Initialize pygame mixer if not already initialized
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+
+                # Load and play the audio
                 pygame.mixer.music.load(temp_filename)
                 pygame.mixer.music.play()
 
@@ -429,19 +435,19 @@ def speak_lines(lines):
                 while pygame.mixer.music.get_busy():
                     time.sleep(0.5)
 
-                # Stop playback and unload the file before deleting
+                # Stop playback and unload the file
                 pygame.mixer.music.stop()
-                pygame.mixer.quit()  # Ensure pygame releases the file
-                
+                pygame.mixer.music.unload()  # Unload the file to release resources
+
                 # Delete the file after playing
                 os.remove(temp_filename)
 
-                # Reinitialize pygame for next playback
-                pygame.mixer.init()
-
             except Exception as e:
                 print(f"Error in text-to-speech conversion: {e}")
-
+                # Reinitialize pygame mixer if an error occurs
+                pygame.mixer.quit()
+                pygame.mixer.init()
+                
 # Main program execution
 if __name__ == "__main__":
     # Start button listener in a separate thread
@@ -462,18 +468,22 @@ if __name__ == "__main__":
     else:
         speak("The system is active now.")
 
-    # Start face recognition
+    # Initialize pygame mixer for playing audio
+    if not pygame.mixer.get_init():
+        pygame.mixer.init()
+
     # Main loop
     while True:
         try:
             if not text_reading_mode:  # Only run face/object detection if not in text reading mode
-                img_resp = urllib.request.urlopen(url)
-                imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
-                img = cv2.imdecode(imgnp, -1)
-                img = cv2.resize(img, (640, 480))
-                img = cv2.transpose(img)
-                img = cv2.flip(img, flipCode=0)
-                process_frame(img)
+                with camera_lock:  # Ensure exclusive access to the camera
+                    img_resp = urllib.request.urlopen(url)
+                    imgnp = np.array(bytearray(img_resp.read()), dtype=np.uint8)
+                    img = cv2.imdecode(imgnp, -1)
+                    img = cv2.resize(img, (640, 480))
+                    img = cv2.transpose(img)
+                    img = cv2.flip(img, flipCode=0)
+                    process_frame(img)
 
             # Exit on 'q' key press
             if cv2.waitKey(1) & 0xFF == ord("q"):
