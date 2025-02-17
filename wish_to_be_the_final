@@ -34,18 +34,18 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 # Firebase Initialization
-cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
-firebase_admin.initialize_app(cred)
+if not firebase_admin._apps:  # Check if Firebase app is not already initialized
+    cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
+    firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # Paths
-url = "http://192.168.88.20/cam-hi.jpg"  # QR & other
+url = "http://192.168.88.17/cam-hi.jpg"  # QR & other
 model_path = "keras_model.tflite"
 labels_path = "labels.txt"
-# Automatically detect Tesseract OCR executable path
 pytesseract.pytesseract.tesseract_cmd = "tesseract"
 
-ESP32_CAM_URL = 'http://192.168.88.19/cam-hi.jpg'  # For text
+ESP32_CAM_URL = 'http://192.168.88.17/cam-hi.jpg'  # For text
 
 # Minimum confidence threshold for detected text
 CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
@@ -77,11 +77,9 @@ frame_count = 0
 # GPIO Setup
 button_pin_note = 26  # Change to your button pin
 button_pin_text = 6
-button_pin_exit_text = 5  # New button to exit text reading mode
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(button_pin_note, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(button_pin_text, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(button_pin_exit_text, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 # Function to speak text
 def speak(text):
@@ -313,13 +311,137 @@ def button_listener_text():
                 if text_reading_mode:
                     print("Entering text reading mode...")
                     stop_thread_event.clear()  # Reset the event
-                    threading.Thread(target=text_reader.text_main, args=(ESP32_CAM_URL, stop_thread_event), daemon=True).start()
+                    # Start text_main in a new thread
+                    threading.Thread(target=text_main, args=(ESP32_CAM_URL, stop_thread_event), daemon=True).start()
                 else:
                     print("Exiting text reading mode...")
                     stop_thread_event.set()  # Signal the thread to stop
                     speak("Exiting text reading mode")
+                    time.sleep(2)  # Delay to allow the exit message to finish
                 last_press_time = current_time
         time.sleep(0.1)  # Polling interval
+
+# Set the path for Tesseract OCR executable
+pytesseract.pytesseract.tesseract_cmd = "tesseract"
+
+# Minimum confidence threshold for detected text
+CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
+
+# Initialize pygame mixer for playing audio
+pygame.mixer.init()
+
+def capture_image_from_cam(url):
+    try:
+        response = urllib.request.urlopen(url, timeout=5)  # Add timeout
+        image_array = np.array(bytearray(response.read()), dtype=np.uint8)
+        image = cv2.imdecode(image_array, -1)
+
+        if image is None:
+            print("Error: Could not decode image from ESP32-CAM.")
+            return None
+        return image
+    except urllib.error.URLError as e:
+        print(f"Error fetching image from ESP32-CAM: {e}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error in capture_image_from_cam: {e}")
+        return None
+
+def preprocess_image(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)  # Apply Gaussian blur
+
+    # Apply adaptive thresholding for better OCR accuracy
+    processed_image = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 11, 2
+    )
+    return processed_image
+
+def recognize_text_line_by_line(image):
+    config = "--psm 6 --oem 3"  # Tesseract OCR configuration
+    data = pytesseract.image_to_data(image, config=config, lang="eng", output_type=pytesseract.Output.DICT)
+
+    # Store lines of text
+    lines = []
+    current_line = []
+    last_line_num = -1  # Track the last processed line number
+
+    for i in range(len(data["text"])):
+        word = data["text"][i].strip()
+        confidence = int(data["conf"][i])
+        line_num = data["line_num"][i]  # Get the line number
+
+        if word and confidence >= CONFIDENCE_THRESHOLD:
+            if line_num != last_line_num and current_line:
+                lines.append(" ".join(current_line))
+                current_line = []  # Reset for new line
+            current_line.append(word)
+            last_line_num = line_num
+
+    if current_line:
+        lines.append(" ".join(current_line))  # Add the last line
+
+    return lines
+
+def speak_lines(lines):
+    for line in lines:
+        if line:
+            print(f"Reading Line: {line}")
+
+            try:
+                # Convert line to speech
+                tts = gTTS(text=line, lang='en')
+                
+                # Save the speech to a temporary file
+                temp_filename = "temp_audio.mp3"
+                tts.save(temp_filename)
+                
+                # Initialize pygame mixer if not already initialized
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
+
+                # Load and play the audio
+                pygame.mixer.music.load(temp_filename)
+                pygame.mixer.music.play()
+
+                # Wait until the speech finishes playing
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.5)
+
+                # Stop playback and unload the file
+                pygame.mixer.music.stop()
+                pygame.mixer.music.unload()  # Unload the file to release resources
+
+                # Delete the file after playing
+                os.remove(temp_filename)
+
+            except Exception as e:
+                print(f"Error in text-to-speech conversion: {e}")
+                # Reinitialize pygame mixer if an error occurs
+                pygame.mixer.quit()
+                pygame.mixer.init()
+
+def text_main(esp32_cam_url, stop_event):
+    print("Starting text reading mode...")
+    while not stop_event.is_set():
+        # Capture image from ESP32-CAM
+        image = capture_image_from_cam(esp32_cam_url)
+
+        if image is not None:
+            # Preprocess the image
+            processed_image = preprocess_image(image)
+
+            # Recognize text line by line
+            detected_lines = recognize_text_line_by_line(processed_image)
+
+            if detected_lines:
+                speak_lines(detected_lines)  # Read text aloud, line by line
+            else:
+                print("No confident text detected.")
+
+        time.sleep(2)  # Small delay before next capture
+
+    print("Exiting text reading mode...")
 
 # Main program execution
 if __name__ == "__main__":
