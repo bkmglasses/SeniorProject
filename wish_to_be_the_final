@@ -32,7 +32,15 @@ pygame.mixer.init()
 # Ensure TensorFlow uses CPU only
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["QT_QPA_PLATFORM"] = "xcb"
-
+# Global Variables
+current_location = None  # Initialize current_location
+encodeListKnown = []
+classNames = []
+qr_scanned = False
+user_id = None
+last_speech_times = {}  # Track last speech time for each face
+speech_delay = 2  # Delay time in seconds to trigger speech again
+frame_count = 0
 # Firebase Initialization
 if not firebase_admin._apps:  # Check if Firebase app is not already initialized
     cred = credentials.Certificate("/home/bkm/Downloads/senior-ade3b-firebase-adminsdk-9179f-c81bcee4a6.json")
@@ -40,12 +48,12 @@ if not firebase_admin._apps:  # Check if Firebase app is not already initialized
 db = firestore.client()
 
 # Paths
-url = "http://192.168.88.17/cam-hi.jpg"  # QR & other
+url = "http://192.168.88.10/cam-hi.jpg"  # QR & other
 model_path = "keras_model.tflite"
 labels_path = "labels.txt"
 pytesseract.pytesseract.tesseract_cmd = "tesseract"
 
-ESP32_CAM_URL = 'http://192.168.88.17/cam-hi.jpg'  # For text
+ESP32_CAM_URL = 'http://192.168.88.11/cam-hi.jpg'  # For text
 
 # Minimum confidence threshold for detected text
 CONFIDENCE_THRESHOLD = 80  # Adjust this value as needed
@@ -75,7 +83,7 @@ speech_delay = 2  # Delay time in seconds to trigger speech again
 frame_count = 0
 
 # GPIO Setup
-button_pin_note = 26  # Change to your button pin
+button_pin_note = 17  # Change to your button pin
 button_pin_text = 6
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(button_pin_note, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -113,7 +121,40 @@ def speak(text):
 
 def speak_thread(text):
     threading.Thread(target=speak, args=(text,)).start()
+def get_current_location():
+    try:
+        # Query the 'locations' collection (there's only one document)
+        locations_ref = db.collection("locations").limit(1)
+        docs = locations_ref.stream()
 
+        for doc in docs:
+            return doc.to_dict().get("room")  # Return the current room number
+
+        return None  # No location found
+    except Exception as e:
+        print(f"Error fetching location from Firestore: {e}")
+        return None
+def monitor_location_changes():
+    global current_location
+
+    print("Starting location monitoring...")
+    speak("Starting location monitoring.")
+
+    while True:
+        try:
+            latest_room = get_current_location()  # Fetch the current room number
+            print(f"Latest room: {latest_room}, Current location: {current_location}")  # Debug print
+
+            if latest_room is not None and latest_room != current_location:
+                # Location has changed
+                print(f"Location changed to: Room {latest_room}")
+                speak(f"Location changed to Room {latest_room}")
+                current_location = latest_room  # Update the current location
+
+            time.sleep(5)  # Check for changes every 5 seconds (adjust as needed)
+        except Exception as e:
+            print(f"Error in location monitoring: {e}")
+            time.sleep(5)  # Retry after a delay
 # Function to scan QR code
 def scan_qr():
     global qr_scanned, user_id
@@ -319,7 +360,7 @@ def button_listener_text():
                     speak("Exiting text reading mode")
                     time.sleep(2)  # Delay to allow the exit message to finish
                 last_press_time = current_time
-        time.sleep(0.1)  # Polling interval
+        time.sleep(0.2)  # Polling interval
 
 # Set the path for Tesseract OCR executable
 pytesseract.pytesseract.tesseract_cmd = "tesseract"
@@ -406,7 +447,7 @@ def speak_lines(lines):
 
                 # Wait until the speech finishes playing
                 while pygame.mixer.music.get_busy():
-                    time.sleep(0.5)
+                    time.sleep(2)
 
                 # Stop playback and unload the file
                 pygame.mixer.music.stop()
@@ -462,6 +503,9 @@ if __name__ == "__main__":
         speak("Error. No known faces detected.")
     else:
         speak("The system is active now.")
+
+    # Start location monitoring in a separate thread
+    threading.Thread(target=monitor_location_changes, daemon=True).start()
 
     # Initialize pygame mixer for playing audio
     if not pygame.mixer.get_init():
